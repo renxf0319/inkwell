@@ -704,12 +704,136 @@ class ImageWidget extends WidgetType {
   }
 }
 
+// --- 表格交互所需的工具函数 ----------------------------------------------
+
+interface TableData {
+  header: string[]
+  rows: string[][]
+  aligns: (Align | null)[]
+}
+
+/** 单元格文本内容（contenteditable 可能在换行处塞 <br>，原样取即可） */
+function cellText(node: Element | null): string {
+  if (!node) return ''
+  // 单元格内换行要压成单空格：Markdown 的表格行必须是一行，
+  // 否则换行会把表格行拆成两行导致渲染出错。
+  return (node.textContent ?? '').replace(/[\r\n]+/g, ' ').replace(/\s+$/, '')
+}
+
+/** 从当前正在渲染的表格 DOM 读回结构化数据（含未落盘的就地编辑） */
+function readTableFromDOM(wrap: HTMLElement, aligns: (Align | null)[]): TableData {
+  const header = Array.from(wrap.querySelectorAll('thead th')).map((th) => cellText(th))
+  const rows = Array.from(wrap.querySelectorAll('tbody tr')).map((tr) =>
+    Array.from(tr.querySelectorAll('td')).map((td) => cellText(td))
+  )
+  return { header, rows, aligns }
+}
+
+function alignToDelim(a: Align | null): string {
+  if (a === 'center') return ':-:'
+  if (a === 'right') return '--:'
+  if (a === 'left') return ':-'
+  return '---'
+}
+
+function buildTableLines(d: TableData): string[] {
+  const delim = d.aligns.map(alignToDelim).join(' | ')
+  const lines = ['| ' + d.header.join(' | ') + ' |', '| ' + delim + ' |']
+  for (const r of d.rows) lines.push('| ' + r.join(' | ') + ' |')
+  return lines
+}
+
+/** 把表格区块整体替换为新内容（多行用 \n 连接） */
+function replaceTableBlock(view: EditorView, block: TableBlock, lines: string[]): void {
+  const from = view.state.doc.line(block.startLine).from
+  const to = view.state.doc.line(block.endLine).to
+  view.dispatch({ changes: { from, to, insert: lines.join('\n') } })
+}
+
+/** 把就地编辑的结果落盘：仅当 DOM 与源码不一致时才写回，避免无意义重渲染 */
+function commitTableIfChanged(view: EditorView, block: TableBlock, wrap: HTMLElement): void {
+  const data = readTableFromDOM(wrap, block.aligns)
+  const lines = buildTableLines(data)
+  const cur: string[] = []
+  for (let n = block.startLine; n <= block.endLine; n++) cur.push(view.state.doc.line(n).text)
+  if (lines.join('\n') === cur.join('\n')) return
+  replaceTableBlock(view, block, lines)
+}
+
+/** 结构变动后，等表格重渲染把光标送回 (row, col) 单元格 */
+function focusCellAfterRender(_view: EditorView, row: number, col: number): void {
+  pendingRefocus = { row, col }
+}
+
+function copyTable(view: EditorView, block: TableBlock): void {
+  const from = view.state.doc.line(block.startLine).from
+  const to = view.state.doc.line(block.endLine).to
+  const text = view.state.doc.sliceString(from, to)
+  const clip = navigator.clipboard
+  if (clip) clip.writeText(text).catch(() => {})
+}
+
+function deleteTable(view: EditorView, block: TableBlock): void {
+  const from = view.state.doc.line(block.startLine).from
+  const lastNo = block.endLine
+  const to = view.state.doc.line(lastNo).to
+  // 连同紧随其后的一个换行一起删，避免出现空行残留
+  let end = to
+  if (lastNo < view.state.doc.lines) end = view.state.doc.line(lastNo + 1).from
+  view.dispatch({ changes: { from, to: end, insert: '' }, selection: { anchor: from } })
+}
+
+/** 在 col 列右侧插入一列 */
+function addColumn(view: EditorView, block: TableBlock, wrap: HTMLElement, col: number): void {
+  const data = readTableFromDOM(wrap, block.aligns)
+  const at = col + 1
+  data.header.splice(at, 0, '')
+  for (const r of data.rows) r.splice(at, 0, '')
+  data.aligns.splice(at, 0, null)
+  replaceTableBlock(view, block, buildTableLines(data))
+  focusCellAfterRender(view, 0, at)
+}
+
+/** 在 rowIdx 行（0 基，不含表头）下方插入一行 */
+function addRow(view: EditorView, block: TableBlock, wrap: HTMLElement, rowIdx: number): void {
+  const data = readTableFromDOM(wrap, block.aligns)
+  const at = rowIdx + 1
+  data.rows.splice(at, 0, Array.from({ length: data.header.length }, () => ''))
+  replaceTableBlock(view, block, buildTableLines(data))
+  focusCellAfterRender(view, at + 1, 0)
+}
+
+/** 单元格内按键：阻止会穿透到 CodeMirror 的少数按键，保存类快捷键先落盘再放行 */
+function onCellKey(e: KeyboardEvent, view: EditorView, block: TableBlock, wrap: HTMLElement): void {
+  const stop = new Set([
+    'Enter',
+    'Backspace',
+    'Delete',
+    'Tab',
+    'ArrowUp',
+    'ArrowDown',
+    'ArrowLeft',
+    'ArrowRight',
+    'Home',
+    'End',
+  ])
+  if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey)) {
+    // 先落盘，再让全局保存快捷键继续生效
+    commitTableIfChanged(view, block, wrap)
+    return
+  }
+  if (stop.has(e.key)) e.stopPropagation()
+}
+
 /**
- * 整块表格 Widget。
+ * 整块表格 Widget（所见即所得，可就地编辑）。
  *
- * 交互：点击任意单元格 → 把光标 dispatch 到该单元格文本的源码位置，
- * 表格随即回落成源码行（因为 cursorLine 落进块内）→ 用户可以正常改字。
- * 光标离开表格后自动渲染回 <table>。
+ * 交互：
+ *  - 单元格 `contenteditable`，点哪格直接在哪格改字，表格**不会**回落成源码；
+ *  - 左上角「编辑表格」按钮弹出菜单：复制 / 剪切 / 删除 整张表格；
+ *  - 列分隔线（每列表头右缘）的「+」在右侧插入一列；
+ *  - 行分隔线（每行首格底边）的「+」在下方插入一行。
+ * 改动通过「离开表格时落盘 / 结构变动时重排」回写到纯 Markdown 源码。
  */
 class TableWidget extends WidgetType {
   constructor(readonly block: TableBlock) {
@@ -719,58 +843,146 @@ class TableWidget extends WidgetType {
     return other.block.sig === this.block.sig
   }
   toDOM(view: EditorView): HTMLElement {
-    const wrap = document.createElement('div')
-    wrap.className = 'cm-md-table-wrap'
+    const wrap = el('div', 'cm-md-table-wrap')
 
-    const table = document.createElement('table')
-    table.className = 'cm-md-table'
+    // ---- 左上角「编辑表格」工具按钮 + 菜单 ----
+    const tools = el('div', 'cm-md-table-tools')
+    const toolsBtn = document.createElement('button')
+    toolsBtn.type = 'button'
+    toolsBtn.className = 'cm-md-table-tools-btn'
+    toolsBtn.textContent = '▦'
+    toolsBtn.title = '编辑表格'
+    toolsBtn.setAttribute('aria-label', '编辑表格')
+    const menu = el('div', 'cm-md-table-menu')
+    menu.style.display = 'none'
+    const mkItem = (label: string, fn: () => void): HTMLButtonElement => {
+      const it = document.createElement('button')
+      it.type = 'button'
+      it.className = 'cm-md-table-menu-item'
+      it.textContent = label
+      it.addEventListener('mousedown', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+      })
+      it.addEventListener('click', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        menu.style.display = 'none'
+        fn()
+      })
+      return it
+    }
+    menu.appendChild(mkItem('复制表格', () => copyTable(view, this.block)))
+    menu.appendChild(
+      mkItem('剪切表格', () => {
+        copyTable(view, this.block)
+        deleteTable(view, this.block)
+      })
+    )
+    menu.appendChild(mkItem('删除表格', () => deleteTable(view, this.block)))
+    toolsBtn.addEventListener('mousedown', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+    })
+    toolsBtn.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      menu.style.display = menu.style.display === 'none' ? 'block' : 'none'
+    })
+    tools.appendChild(toolsBtn)
+    tools.appendChild(menu)
+    wrap.appendChild(tools)
 
+    // 点击表格其它区域时收起菜单
+    wrap.addEventListener('mousedown', () => {
+      menu.style.display = 'none'
+    })
+
+    const table = el('table', 'cm-md-table')
+
+    // ---- 表头 + 列加号 ----
     const thead = document.createElement('thead')
     const htr = document.createElement('tr')
-    this.block.header.cells.forEach((c, i) => htr.appendChild(this.cell('th', c, i)))
+    this.block.header.cells.forEach((c, i) => {
+      const th = this.cellEl('th', c, i, 0, view, wrap)
+      htr.appendChild(th)
+      const add = el('span', 'cm-md-col-add')
+      add.textContent = '+'
+      add.title = '在右侧插入一列'
+      add.dataset.col = String(i)
+      add.addEventListener('mousedown', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+      })
+      add.addEventListener('click', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        addColumn(view, this.block, wrap, i)
+      })
+      th.appendChild(add)
+    })
     thead.appendChild(htr)
     table.appendChild(thead)
 
+    // ---- 表体 + 行加号 ----
     const tbody = document.createElement('tbody')
-    for (const row of this.block.rows) {
+    this.block.rows.forEach((row, ri) => {
       const tr = document.createElement('tr')
-      row.cells.forEach((c, i) => tr.appendChild(this.cell('td', c, i)))
+      row.cells.forEach((c, ci) => {
+        const td = this.cellEl('td', c, ci, ri + 1, view, wrap)
+        tr.appendChild(td)
+        if (ci === 0) {
+          const add = el('span', 'cm-md-row-add')
+          add.textContent = '+'
+          add.title = '在下方插入一行'
+          add.dataset.row = String(ri)
+          add.addEventListener('mousedown', (e) => {
+            e.preventDefault()
+            e.stopPropagation()
+          })
+          add.addEventListener('click', (e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            addRow(view, this.block, wrap, ri)
+          })
+          td.appendChild(add)
+        }
+      })
       tbody.appendChild(tr)
-    }
+    })
     table.appendChild(tbody)
     wrap.appendChild(table)
 
-    // 点哪格就把光标送到那格的源码位置。
-    // 两条约束，顺序也不能错：
-    //  1. 必须 preventDefault：否则 CodeMirror 会先处理这次点击，把光标放到
-    //     widget 覆盖区间的边界（表格第一行行首），而不是我们想去的单元格。
-    //  2. **必须先 focus 再 dispatch**：activeLine() 靠 view.hasFocus 判断
-    //     「光标行」，先 dispatch 的话编辑器还没聚焦 → cursorLine = -1
-    //     → 表格立刻又渲染回 <table>，看起来像点击没生效。
-    wrap.addEventListener('mousedown', (e) => {
-      const td = (e.target as HTMLElement | null)?.closest?.('[data-pos]') as HTMLElement | null
-      if (!td) return
-      const pos = Number(td.dataset.pos)
-      if (!Number.isFinite(pos)) return
-      e.preventDefault()
-      view.focus()
-      view.dispatch({ selection: { anchor: pos }, userEvent: 'select.pointer' })
+    // 焦点离开表格（移到表格外）时，把未提交的单元格改动落盘
+    wrap.addEventListener('focusout', (e: FocusEvent) => {
+      const related = e.relatedTarget as Node | null
+      if (related && wrap.contains(related)) return // 仍在同一表内（切到另一格 / 点 + 按钮），不提交
+      commitTableIfChanged(view, this.block, wrap)
     })
+
     return wrap
   }
-  private cell(tag: 'th' | 'td', c: TableCell, col: number): HTMLElement {
+  private cellEl(
+    tag: 'th' | 'td',
+    c: TableCell,
+    col: number,
+    row: number,
+    view: EditorView,
+    wrap: HTMLElement
+  ): HTMLElement {
     const td = document.createElement(tag)
     const align = this.block.aligns[col]
     if (align) td.style.textAlign = align
-    // 点击定位到单元格文本末尾：光标在行尾时用户接着就能输入，
-    // 停在行首则要先按 End 键，不符合直觉
-    td.dataset.pos = String(Math.max(c.from, c.to > c.from ? c.to - 1 : c.to))
-    // 列数不足时补空格，避免 <td> 空着看起来像漏了内容
-    td.appendChild(renderInlineDOM(c.text || ' '))
+    td.dataset.row = String(row)
+    td.dataset.col = String(col)
+    td.setAttribute('contenteditable', 'true')
+    td.className = 'cm-md-cell'
+    td.appendChild(renderInlineDOM(c.text))
+    td.addEventListener('keydown', (e) => onCellKey(e, view, this.block, wrap))
     return td
   }
   ignoreEvent(): boolean {
-    // 交给我们自己的 mousedown 处理（把光标送进源码），不走编辑器默认行为
+    // 表格内的编辑 / 点击全部由我们自己的处理器接管，不走编辑器默认行为
     return true
   }
 }
@@ -794,6 +1006,13 @@ class TableWidget extends WidgetType {
  * 用于「光标命中的是哪个标记」的二分查找，避免每次按方向键都全文重扫。
  */
 let markIndex: [number, number][] = []
+/** 结构变动（增删行列）后，等表格重渲染把光标送回目标单元格 */
+let pendingRefocus: { row: number; col: number } | null = null
+
+/** 焦点是否落在表格控件内部（contenteditable 单元格 / + 按钮 / 工具栏） */
+function isInsideTableWidget(el: Element | null): boolean {
+  return !!el && el.closest('.cm-md-table-wrap') !== null
+}
 
 /** 二分查找：光标 pos 命中的标记下标；没命中返回 -1 */
 function findMark(pos: number): number {
@@ -860,64 +1079,19 @@ function buildFrom(state: EditorState): DecorationSet {
       tableCache.set(n, block)
 
       if (block) {
-        const cursorIn = ctx.cursorLine >= block.startLine && ctx.cursorLine <= block.endLine
-
-        if (cursorIn) {
-          // 光标在表内：整块回落源码，逐行只做行内解析，用户可正常改字
-          for (let k = block.startLine; k <= block.endLine; k++) {
-            const tl = state.doc.line(k)
-            ctx.claimed = []
-            if (k === block.delimLine) {
-              // 分隔行整行都是语法：光标真落进去（要改 `:---:` 的对齐方式）时才露出
-              addLine(ctx, tl.from, 'cm-md-tr-delim')
-              hideInline(ctx, tl.from, tl.to)
-            } else {
-              addLine(ctx, tl.from, k === block.startLine ? 'cm-md-tr cm-md-tr-head' : 'cm-md-tr')
-              processInline(ctx, tl.from, tl.text)
-            }
-          }
-        } else {
-          // 光标不在表内：整块换成 <table>（`block: true` 整体替换）。
-          //
-          // ⚠️ 用 `block: true` 是**有条件**的：Widget 绝不能带纵向 margin，
-          // 否则它下方所有行的点击都会偏到下一行。详见下面这段排查记录。
-          //
-          // ─── 排查记录（v0.3.6）──────────────────────────────────────
-          // 现象：用户报告「点某一行，光标却落到了下一行」，
-          // 文档《网关安全与性能检查报告.md》里紧跟在表格 / 分隔线后面的行。
-          //
-          // 根因**不在 CodeMirror**，而在我们的 CSS：
-          // CM 用 `elementAtHeight` 逐像素反查「这个 y 属于哪个块」，
-          // 只认盒子的 border-box —— **margin 在盒外，它完全看不见**。
-          // 于是 `.cm-md-table-wrap { margin: 0.6em 0 }` 让 DOM 里的表格
-          // 比 CM 记账的位置低 9.6px、底部再多 9.6px；
-          // `.cm-md-hr { margin-top: 0.6em }` 又让每个 `---` 各累加 9.6px。
-          // 用户的文档有 4 个分隔线，累计偏移 38px > 半行高（14.5px），
-          // 点击于是整体落到下一行。
-          //
-          // 官方文档对此有明确要求：
-          //   "block-level decorations should not have vertical margins"
-          //
-          // 修法：把这两处的纵向间距全部改用 `padding`（在盒内，CM 量得到，
-          // 视觉等价），并在 global.css 里加了一道全局防线：
-          //   `.editor-host .cm-content * { margin-top/bottom: 0 !important }`
-          //
-          // 实测（真实文档，逐行逐点）：
-          //   margin 归零前：累计偏移 38px，65 行里 52 行点击落错
-          //   margin 归零后：累计偏移 0px，65 行 **0 行落错**
-          //
-          // ⚠️ 别再往内容区加纵向 margin。若将来又出现「点击偏一行」，
-          // 第一件事是量一遍「CM lineBlockAt 的 top vs DOM 实际 top」的差值，
-          // 而不是改 CodeMirror。
-          out.push({
-            from: state.doc.line(block.startLine).from,
-            to: state.doc.line(block.endLine).to,
-            deco: Decoration.replace({
-              widget: new TableWidget(block),
-              block: true,
-            }),
-          })
-        }
+        // 整块换成 <table>（`block: true` 整体替换）。表格始终以所见即所得形式呈现，
+        // 点击进入后**不再回落成源码**——单元格本身可就地编辑（见 TableWidget）。
+        //
+        // ⚠️ `block: true` 的 Widget 绝不能带纵向 margin（会令其下方所有行点击偏到下一行，
+        // 见 global.css 里 `.editor-host .cm-content *` 的全局防线）。
+        out.push({
+          from: state.doc.line(block.startLine).from,
+          to: state.doc.line(block.endLine).to,
+          deco: Decoration.replace({
+            widget: new TableWidget(block),
+            block: true,
+          }),
+        })
         n = block.endLine
         continue
       }
@@ -1001,11 +1175,45 @@ const cursorSync = EditorView.updateListener.of((u) => {
   if (u.docChanged) return
   const focused = u.view.hasFocus
   if (focused === focusProxy) return
+  // 焦点落到了表格控件内部（contenteditable 单元格 / + 按钮 / 工具栏）时，
+  // 不要当成「编辑器失焦」—— 否则会触发整表重渲染、破坏正在编辑的单元格。
+  if (!focused && isInsideTableWidget(document.activeElement)) return
   u.view.dispatch({ effects: setFocus.of(focused) })
 })
 
+/**
+ * 结构变动（增删行列）后，等表格重渲染把光标送回目标单元格。
+ * 在 rAF 里执行：此时 CodeMirror 已完成 DOM 更新，新 Widget 的单元格已就位。
+ */
+const tableRefocus = EditorView.updateListener.of((u) => {
+  if (!pendingRefocus) return
+  if (!u.docChanged) return
+  const target = pendingRefocus
+  pendingRefocus = null
+  const view = u.view
+  requestAnimationFrame(() => {
+    const wraps = view.dom.querySelectorAll('.cm-md-table-wrap')
+    for (const w of Array.from(wraps) as HTMLElement[]) {
+      const cell = w.querySelector(`[data-row="${target.row}"][data-col="${target.col}"]`)
+      if (cell) {
+        const node = cell as HTMLElement
+        node.focus()
+        const sel = window.getSelection()
+        if (sel) {
+          const range = document.createRange()
+          range.selectNodeContents(node)
+          range.collapse(false)
+          sel.removeAllRanges()
+          sel.addRange(range)
+        }
+        break
+      }
+    }
+  })
+})
+
 export function livePreview(): Extension {
-  return [decoField, cursorSync]
+  return [decoField, cursorSync, tableRefocus]
 }
 
 // --- 供大纲跳转使用 ------------------------------------------------------

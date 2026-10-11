@@ -30,6 +30,7 @@ import {
 import { useStore } from '../state/store'
 import { livePreview, lineToPos } from '../lib/wysiwyg'
 import { fenceLangCompletion } from '../lib/fenceLang'
+import { slashCompletion } from '../lib/slash'
 import { isMarkdownFile, isCodeFile } from '../lib/filetype'
 
 /**
@@ -121,7 +122,7 @@ export default function Editor() {
         ...(mdMode
           ? [
               autocompletion({
-                override: [fenceLangCompletion],
+                override: [slashCompletion, fenceLangCompletion],
                 activateOnTyping: true,
                 // 行内已经有完整单词（如写了 `java` 之外的正文）时不打扰
                 defaultKeymap: true,

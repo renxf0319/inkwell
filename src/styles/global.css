@@ -694,6 +694,8 @@ body.resizing-col * {
   /* 表格可能比正文窄栏宽，给一层横向滚动，别把整行撑破布局 */
   overflow-x: auto;
   overflow-y: hidden;
+  /* 工具栏与行列「+」按钮需要相对表格定位 */
+  position: relative;
 }
 .editor-host .cm-md-table {
   border-collapse: collapse;
@@ -711,6 +713,9 @@ body.resizing-col * {
   word-break: break-word;
   vertical-align: top;
   text-align: left;
+  /* 行列「+」按钮相对单元格定位，且不被内容溢出裁掉 */
+  position: relative;
+  overflow: visible;
 }
 .editor-host .cm-md-table th {
   background: var(--bg-elev);
@@ -725,6 +730,112 @@ body.resizing-col * {
 /* 单元格内的行内标记：沿用全局样式，但去掉行内代码的行内 padding 会显得挤 */
 .editor-host .cm-md-table .cm-md-code {
   padding: 1px 4px;
+}
+
+/* --- 可交互表格：就地编辑的单元格 + 左上角工具栏 + 行列「+」按钮 --- */
+.editor-host .cm-md-cell {
+  outline: none;
+  min-width: 2.5em;
+}
+.editor-host .cm-md-cell:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 2px;
+}
+
+/* 左上角「编辑表格」按钮：浮在表格左上角，点开复制 / 剪切 / 删除 整张表 */
+.editor-host .cm-md-table-tools {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 5;
+}
+.editor-host .cm-md-table-tools-btn {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.85;
+  /* 发起动作的按钮，保留手型 */
+  cursor: pointer;
+}
+.editor-host .cm-md-table-tools-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.editor-host .cm-md-table-menu {
+  position: absolute;
+  top: 26px;
+  left: 0;
+  min-width: 120px;
+  padding: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-lg);
+  z-index: 6;
+}
+.editor-host .cm-md-table-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 4px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.editor-host .cm-md-table-menu-item:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* 行列分隔线上的「+」：默认淡隐，鼠标移到表格上才显形 */
+.editor-host .cm-md-col-add,
+.editor-host .cm-md-row-add {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 4;
+  transition: opacity 0.12s;
+}
+.editor-host .cm-md-table-wrap:hover .cm-md-col-add,
+.editor-host .cm-md-table-wrap:hover .cm-md-row-add {
+  opacity: 0.9;
+}
+.editor-host .cm-md-col-add:hover,
+.editor-host .cm-md-row-add:hover {
+  opacity: 1;
+  background: var(--accent);
+  color: #fff;
+}
+/* 列「+」贴在每列表头右缘（列分隔线）；行「+」贴在每行首格底边（行分隔线） */
+.editor-host .cm-md-col-add {
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.editor-host .cm-md-row-add {
+  left: 2px;
+  bottom: 2px;
 }
 
 /* --- 源码回落态：光标进入表格后，逐行显示原始竖线 --- */
