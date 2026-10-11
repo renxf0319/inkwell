@@ -1,13 +1,13 @@
 # dev-desktop.ps1
 # Launch Kore in DESKTOP dev mode (Tauri) with hot reload.
 #
-# This is the everyday local-dev entry point: it starts the Vite dev server
-# (HMR) and opens a real native window that reloads instantly on every save.
-# You do NOT need to build/publish an installer to test changes.
+# Everyday local-dev entry point: starts the Vite dev server (HMR) and opens a
+# real native window that reloads instantly on every save. No installer needed.
 #
-# It also keeps the Rust toolchain on a non-system drive, honoring the
-# "do not write to C:" rule. It reuses the locations chosen by
-# scripts/install-rust.ps1 (CARGO_HOME=<dir>\cargo, RUSTUP_HOME=<dir>\rustup).
+# Rust toolchain resolution is PORTABLE: it finds cargo wherever it lives
+# (already on PATH, via $CARGO_HOME, on common non-system drives, or the
+# default ~/.cargo) instead of assuming a fixed drive layout. Both the
+# `<root>\cargo` and `<root>\.cargo` layouts are supported.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts/dev-desktop.ps1
@@ -26,22 +26,45 @@ Set-Location $repo
 function Resolve-RustHome {
   param([string]$Explicit)
   if ($Explicit) { return $Explicit.TrimEnd('\') }
+
+  # 1) Explicit CARGO_HOME (points at the cargo dir; take its parent as root)
   if ($env:CARGO_HOME) {
     $p = Split-Path $env:CARGO_HOME -Parent
     if ($p) { return $p }
   }
+
+  # 2) cargo already on PATH (rustup default install OR any custom location)
+  $cargoCmd = Get-Command cargo.exe -ErrorAction SilentlyContinue
+  if (-not $cargoCmd) { $cargoCmd = Get-Command cargo -ErrorAction SilentlyContinue }
+  if ($cargoCmd) {
+    # cargo lives at <root>\cargo\bin\cargo.exe  or  <root>\.cargo\bin\cargo.exe,
+    # so walk up THREE levels from the executable to reach <root>.
+    $root = Split-Path (Split-Path (Split-Path $cargoCmd.Source -Parent) -Parent) -Parent
+    if (Test-Path (Join-Path $root "cargo\bin\cargo.exe"))  { return $root }
+    if (Test-Path (Join-Path $root ".cargo\bin\cargo.exe")) { return $root }
+    return $root
+  }
+
+  # 3) Common non-system drive locations (legacy kore convention)
   foreach ($d in @("E:\rust", "D:\rust", "F:\rust")) {
     if (Test-Path (Join-Path $d "cargo\bin\cargo.exe")) { return $d }
   }
-  # Last resort: default rustup location (may be on C:).
+
+  # 4) Default rustup location (may be on C:)
   if (Test-Path (Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe")) {
-    return (Join-Path $env:USERPROFILE ".cargo")
+    return $env:USERPROFILE
   }
   return $null
 }
 
-$home = Resolve-RustHome -Explicit $RustHome
-if (-not $home) {
+# NOTE: do NOT name this variable `$home`. PowerShell variable names are
+# case-insensitive, and `$HOME` is a READ-ONLY automatic variable holding the
+# user's home directory. Assigning to `$home` throws:
+#   WriteError: (HOME:String) [], ParentContainsErrorRecordException
+#     FullyQualifiedErrorId : VariableNotWritable
+# which would abort the launcher before Rust is even located.
+$rustRoot = Resolve-RustHome -Explicit $RustHome
+if (-not $rustRoot) {
   Write-Host ""
   Write-Host "[dev] Rust toolchain not found." -ForegroundColor Yellow
   Write-Host "      Install it first (choose a non-C: drive when prompted):"
@@ -52,12 +75,17 @@ if (-not $home) {
   exit 1
 }
 
-$cargoHome  = Join-Path $home "cargo"
-$rustupHome = Join-Path $home "rustup"
-
-# If this is the default ~/.cargo layout, respect the real env var values.
-if (Test-Path (Join-Path $home ".cargo")) { $cargoHome = $home }
-if (Test-Path (Join-Path $home ".rustup")) { $rustupHome = Join-Path $home ".rustup" }
+# Resolve cargo/rustup layout: support both `<root>\cargo` and `<root>\.cargo`.
+if (Test-Path (Join-Path $rustRoot "cargo\bin\cargo.exe")) {
+  $cargoHome  = Join-Path $rustRoot "cargo"
+  $rustupHome = Join-Path $rustRoot "rustup"
+} elseif (Test-Path (Join-Path $rustRoot ".cargo\bin\cargo.exe")) {
+  $cargoHome  = Join-Path $rustRoot ".cargo"
+  $rustupHome = Join-Path $rustRoot ".rustup"
+} else {
+  Write-Host "[dev] Found '$rustRoot' but no cargo.exe inside; aborting." -ForegroundColor Red
+  exit 1
+}
 
 $env:CARGO_HOME  = $cargoHome
 $env:RUSTUP_HOME = $rustupHome
@@ -79,6 +107,10 @@ Write-Host "[dev] Rust toolchain check:"
 if (-not $NoInstall -and -not (Test-Path (Join-Path $repo "node_modules"))) {
   Write-Host "[dev] node_modules missing, running npm install ..."
   npm install --no-audit --no-fund
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "[dev] npm install failed (exit $LASTEXITCODE)." -ForegroundColor Red
+    exit $LASTEXITCODE
+  }
 }
 
 Write-Host ""
@@ -86,18 +118,51 @@ Write-Host "[dev] Starting Tauri dev (Vite HMR + native window, hot reload on sa
 Write-Host "[dev] Close the app window (or press Ctrl+C here) to stop."
 Write-Host ""
 
-# --- Pin the Node version (keeps the system-wide Node untouched) -------------
-$nodeVersion = '22.23.3'
+# --- Resolve Node (portable) ----------------------------------------------
+# Order: fnm/FNM_DIR pinned > WorkBuddy-managed Node > PATH default.
+# The managed Node lives on disk under
+#   %USERPROFILE%\.workbuddy\binaries\node\versions
+# but is typically NOT on PATH for a double-clicked launcher, which would
+# otherwise fall back to a stale system Node (e.g. v16) and fail check-node.mjs.
+$nodeVersion = '22'
 $vnFile = Join-Path $repo '.node-version'
 if (Test-Path $vnFile) { $nodeVersion = (Get-Content $vnFile -Raw).Trim() }
-$fnmData = if ($env:FNM_DIR) { $env:FNM_DIR } else { 'E:\fnm-data' }
-$nodeDir = Join-Path $fnmData "node-versions\v$nodeVersion\installation"
-if (Test-Path (Join-Path $nodeDir 'node.exe')) {
+
+$nodeDir = $null
+
+# 1) fnm-pinned version
+if ($env:FNM_DIR) {
+  $fnmCandidate = Join-Path $env:FNM_DIR "node-versions\v$nodeVersion\installation"
+  if (Test-Path (Join-Path $fnmCandidate 'node.exe')) { $nodeDir = $fnmCandidate }
+}
+
+# 2) WorkBuddy-managed Node: prefer the "current" pointer, else the newest dir
+if (-not $nodeDir) {
+  $wbRoot = Join-Path $env:USERPROFILE '.workbuddy\binaries\node\versions'
+  if (Test-Path $wbRoot) {
+    $wbCurrent = Join-Path $wbRoot 'current'
+    if (Test-Path (Join-Path $wbCurrent 'node.exe')) {
+      $nodeDir = $wbCurrent
+    } else {
+      $wbNewest = Get-ChildItem $wbRoot -Directory -ErrorAction SilentlyContinue |
+                  Sort-Object Name -Descending |
+                  Where-Object { Test-Path (Join-Path $_.FullName 'node.exe') } |
+                  Select-Object -First 1
+      if ($wbNewest) { $nodeDir = $wbNewest.FullName }
+    }
+  }
+}
+
+if ($nodeDir) {
   $env:Path = "$nodeDir;$env:Path"
   $nv = & (Join-Path $nodeDir 'node.exe') -v
   Write-Host "[dev] node $nv  ($nodeDir)"
 } else {
-  Write-Host "[dev] Node $nodeVersion not found under $fnmData; using PATH default." -ForegroundColor Yellow
+  Write-Host "[dev] No managed Node found; falling back to PATH default." -ForegroundColor Yellow
 }
 
 npm run tauri dev
+# Propagate the exit code: when tauri fails to start (missing Rust deps, compile
+# errors, ...) the outer .cmd can then pause instead of the window flashing
+# shut and hiding the error.
+exit $LASTEXITCODE

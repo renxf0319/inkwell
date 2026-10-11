@@ -84,7 +84,19 @@ $args = @("-y", "--default-toolchain", "stable", "--profile", "minimal", "--no-m
 if ($Gnu) { $args += @("--default-host", "x86_64-pc-windows-gnu") }
 
 Write-Host "Running rustup-init ..."
-& $tmp @args
+# rustup-init 在缺少前置（如 MSVC C++ 链接器）时会往 stderr 打一条警告并继续安装；
+# 但本脚本开头设了 $ErrorActionPreference="Stop"，PowerShell 会把原生程序的 stderr
+# 当成致命错误（NativeCommandError）从而中止安装。这里临时放宽错误偏好，把 stderr
+# 合并进输出流避免被误判为异常，再检查真实退出码。
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $tmp @args 2>&1 | ForEach-Object { $_ }
+$rustupRc = $LASTEXITCODE
+$ErrorActionPreference = $prevEAP
+if ($rustupRc -ne 0) {
+  Write-Host "[install-rust] rustup-init failed (exit $rustupRc)." -ForegroundColor Red
+  exit $rustupRc
+}
 
 # Add cargo\bin to the user PATH so `cargo` / `rustc` work in new terminals.
 $cargoBin = Join-Path $cargoHome "bin"
