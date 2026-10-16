@@ -720,11 +720,24 @@ function cellText(node: Element | null): string {
   return (node.textContent ?? '').replace(/[\r\n]+/g, ' ').replace(/\s+$/, '')
 }
 
+/**
+ * 从单元格 DOM 读回**纯内容**文本。
+ *
+ * ⚠️ 必须只读 `.cm-md-cell-content` 子层，绝不能读整个单元格的 textContent：
+ * 单元格里还挂着行/列「+」按钮（.cm-md-col-add / .cm-md-row-add），
+ * 它们的文字恰好就是 "+"。曾经直接读 td.textContent 落盘，
+ * 结果每提交一次就往 Markdown 里写进一批 "+"，下次渲染再叠加 ——
+ * 单元格被滚雪球式污染成 "++++++++"。这是结构事故，不是样式问题。
+ */
+function readCellText(cell: Element | null): string {
+  return cellText(cell?.querySelector(':scope > .cm-md-cell-content') ?? null)
+}
+
 /** 从当前正在渲染的表格 DOM 读回结构化数据（含未落盘的就地编辑） */
 function readTableFromDOM(wrap: HTMLElement, aligns: (Align | null)[]): TableData {
-  const header = Array.from(wrap.querySelectorAll('thead th')).map((th) => cellText(th))
+  const header = Array.from(wrap.querySelectorAll('thead th')).map((th) => readCellText(th))
   const rows = Array.from(wrap.querySelectorAll('tbody tr')).map((tr) =>
-    Array.from(tr.querySelectorAll('td')).map((td) => cellText(td))
+    Array.from(tr.querySelectorAll('td')).map((td) => readCellText(td))
   )
   return { header, rows, aligns }
 }
@@ -977,7 +990,11 @@ class TableWidget extends WidgetType {
     td.dataset.col = String(col)
     td.setAttribute('contenteditable', 'true')
     td.className = 'cm-md-cell'
-    td.appendChild(renderInlineDOM(c.text))
+    // 内容必须包一层 .cm-md-cell-content：落盘读取（readCellText）只认这一层。
+    // 「+」按钮作为兄弟节点挂在内容层外面，永远不会被当成单元格文本写回源码。
+    const content = el('span', 'cm-md-cell-content')
+    content.appendChild(renderInlineDOM(c.text))
+    td.appendChild(content)
     td.addEventListener('keydown', (e) => onCellKey(e, view, this.block, wrap))
     return td
   }

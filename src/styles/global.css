@@ -690,25 +690,51 @@ body.resizing-col * {
    * 结论：**纵向间距一律用 padding 表达，不用 margin**。
    * padding 属于盒子的一部分，CM 量得到，视觉上与 margin 等价。 */
   margin: 0;
-  padding: 0.6em 0;
+  padding: 0.25em;
+  /* 外框 + 圆角：整张表的轮廓由 wrap 统一画，内部单元格只留分隔线，
+     不再是每格一圈的「铁丝网」观感 */
+  border: 1px solid var(--border);
+  border-radius: 8px;
   /* 表格可能比正文窄栏宽，给一层横向滚动，别把整行撑破布局 */
   overflow-x: auto;
   overflow-y: hidden;
   /* 工具栏与行列「+」按钮需要相对表格定位 */
   position: relative;
 }
+/* 细滚动条：原生滚动条的箭头按钮又粗又丑，换成一条安静的细条 */
+.editor-host .cm-md-table-wrap::-webkit-scrollbar {
+  height: 8px;
+}
+.editor-host .cm-md-table-wrap::-webkit-scrollbar-button {
+  display: none;
+}
+.editor-host .cm-md-table-wrap::-webkit-scrollbar-track {
+  background: transparent;
+}
+.editor-host .cm-md-table-wrap::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 4px;
+}
+.editor-host .cm-md-table-wrap::-webkit-scrollbar-thumb:hover {
+  background: var(--border);
+}
 .editor-host .cm-md-table {
-  border-collapse: collapse;
-  /* width:auto 而非 100%：窄表格就窄着，和 Typora 一致，不强行拉满 */
-  max-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
   margin: 0;
   font-size: 0.95em;
   line-height: 1.6;
 }
 .editor-host .cm-md-table th,
 .editor-host .cm-md-table td {
-  border: 1px solid var(--border);
-  padding: 6px 12px;
+  border: none;
+  /* 竖向分隔线（每格左缘）+ 行间横线（每格上缘），
+     外圈轮廓由 wrap 的边框负责，这里不再重复画 */
+  box-shadow:
+    inset 1px 0 0 var(--border),
+    0 -1px 0 var(--border);
+  padding: 9px 14px;
   /* 单元格内容长短不一时，窄列里的长路径/长串要能断行，否则会把表格撑得很宽 */
   word-break: break-word;
   vertical-align: top;
@@ -717,15 +743,31 @@ body.resizing-col * {
   position: relative;
   overflow: visible;
 }
+/* 首列去掉左侧竖线，避免与 wrap 左边框贴出双线 */
+.editor-host .cm-md-table th:first-child,
+.editor-host .cm-md-table td:first-child {
+  box-shadow: 0 -1px 0 var(--border);
+}
 .editor-host .cm-md-table th {
-  background: var(--bg-elev);
+  background: color-mix(in srgb, var(--bg-elev) 60%, var(--accent-soft));
   color: var(--heading-fg);
-  font-weight: 700;
+  font-weight: 600;
   white-space: nowrap;
+  /* 表头底线加重（2px 主色调）：整张表的视觉锚点在顶部 */
+  box-shadow:
+    inset 1px 0 0 var(--border),
+    0 2px 0 color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+.editor-host .cm-md-table th:first-child {
+  box-shadow: 0 2px 0 color-mix(in srgb, var(--accent) 50%, var(--border));
 }
 /* 斑马纹：宽表横向扫行时能对上列。浅到不干扰阅读 */
 .editor-host .cm-md-table tbody tr:nth-child(even) {
-  background: color-mix(in srgb, var(--bg-elev) 55%, transparent);
+  background: color-mix(in srgb, var(--bg-elev) 45%, transparent);
+}
+/* 悬停行高亮：宽表里鼠标扫到哪行看哪行 */
+.editor-host .cm-md-table tbody tr:hover {
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
 }
 /* 单元格内的行内标记：沿用全局样式，但去掉行内代码的行内 padding 会显得挤 */
 .editor-host .cm-md-table .cm-md-code {
@@ -735,7 +777,13 @@ body.resizing-col * {
 /* --- 可交互表格：就地编辑的单元格 + 左上角工具栏 + 行列「+」按钮 --- */
 .editor-host .cm-md-cell {
   outline: none;
-  min-width: 2.5em;
+  min-width: 3em;
+}
+/* 单元格内容层：落盘读取（readCellText）只认这一层，
+   行/列「+」按钮是它的兄弟节点，永远不会混进单元格文本 */
+.editor-host .cm-md-cell-content {
+  display: block;
+  min-height: 1.4em;
 }
 .editor-host .cm-md-cell:focus {
   outline: 2px solid var(--accent);
@@ -762,13 +810,22 @@ body.resizing-col * {
   color: var(--fg);
   font-size: 13px;
   line-height: 1;
-  opacity: 0.85;
+  /* 悬停显形：工具按钮和行列「+」一样，鼠标进表才出现，不常驻遮挡首格 */
+  opacity: 0;
+  transition: opacity 0.12s;
   /* 发起动作的按钮，保留手型 */
   cursor: pointer;
+  pointer-events: none;
+}
+/* 鼠标在表格上时按钮才可点（配合 opacity 过渡，避免透明层挡点击） */
+.editor-host .cm-md-table-wrap:hover .cm-md-table-tools-btn {
+  opacity: 0.9;
+  pointer-events: auto;
 }
 .editor-host .cm-md-table-tools-btn:hover {
   border-color: var(--accent);
   color: var(--accent);
+  opacity: 1;
 }
 .editor-host .cm-md-table-menu {
   position: absolute;
