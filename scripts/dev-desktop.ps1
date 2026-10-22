@@ -21,14 +21,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Resolve the repo root FIRST: everything below (log path, CARGO_HOME, etc.)
+# depends on it. Defining $repo after it is used caused a null-argument fatal
+# error that aborted the launcher before any diagnostics could run.
+$repo = Split-Path -Parent $PSScriptRoot
+Set-Location $repo
+
 # Diagnostics: mirror all output to dev-desktop.log so a crash is never a silent
 # flash. Start-Transcript can be blocked under Constrained Language Mode; ignore
 # that failure and keep running.
 $logFile = Join-Path $repo "dev-desktop.log"
 try { Start-Transcript -Path $logFile -Append -ErrorAction Stop } catch { }
-
-$repo = Split-Path -Parent $PSScriptRoot
-Set-Location $repo
 
 function Resolve-RustHome {
   param([string]$Explicit)
