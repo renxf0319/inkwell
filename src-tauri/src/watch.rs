@@ -51,7 +51,7 @@ pub struct FsChange {
 /// 就立刻停止监听（后台线程随之退出）。若只把接收端存起来、让 watcher
 /// 随作用域结束被回收，表现就是「事件一个都收不到，但也不报错」——
 /// 极难排查。所以这里用 State 把它**挂在 App 生命周期上**。
-struct WatchState {
+pub(crate) struct WatchState {
     /// 换工作区时先 drop 旧的再装新的，天然实现「取消上一个」
     watcher: Option<notify::RecommendedWatcher>,
     /// 当前正在监听的根目录，用于幂等判断（重复 watch 同一路径直接返回）
