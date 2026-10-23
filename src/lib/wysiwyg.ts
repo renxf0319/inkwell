@@ -773,7 +773,13 @@ function commitTableIfChanged(view: EditorView, block: TableBlock, wrap: HTMLEle
   replaceTableBlock(view, block, lines)
 }
 
-/** 结构变动后，等表格重渲染把光标送回 (row, col) 单元格 */
+/**
+ * 登记「结构变动后把光标送回 (row, col)」。
+ *
+ * ⚠️ 必须在 `view.dispatch` **之前**调用：CodeMirror 的 updateListener 是在
+ * dispatch 内部同步触发的。早期把它写在 dispatch 之后，监听器早已跑完，
+ * pendingRefocus 只能等下一次文档变化才被消费 —— 表现为增删行列后光标凭空消失。
+ */
 function focusCellAfterRender(_view: EditorView, row: number, col: number): void {
   pendingRefocus = { row, col }
 }
@@ -827,28 +833,44 @@ function insertColumnAt(
   data.header.splice(idx, 0, '')
   for (const r of data.rows) r.splice(idx, 0, '')
   data.aligns.splice(idx, 0, null)
-  replaceTableBlock(view, block, buildTableLines(data))
   focusCellAfterRender(view, Math.min(Math.max(focusRow, 0), data.rows.length), idx)
+  replaceTableBlock(view, block, buildTableLines(data))
 }
 
-/** 在表体行索引 at 处（0..行数）插入一行；at=0 表示表头正下方 */
-function insertRowAt(view: EditorView, block: TableBlock, wrap: HTMLElement, at: number): void {
+/**
+ * 在表体行索引 at 处（0..行数）插入一行；at=0 表示表头正下方。
+ * focusCol：插完把光标放在新行的哪一列（默认第 0 列，菜单操作传光标所在列）。
+ */
+function insertRowAt(
+  view: EditorView,
+  block: TableBlock,
+  wrap: HTMLElement,
+  at: number,
+  focusCol = 0
+): void {
   const data = readTableFromDOM(wrap, block.aligns)
   const idx = Math.min(Math.max(at, 0), data.rows.length)
   data.rows.splice(idx, 0, Array.from({ length: data.header.length }, () => ''))
+  focusCellAfterRender(view, idx + 1, Math.min(Math.max(focusCol, 0), data.header.length - 1))
   replaceTableBlock(view, block, buildTableLines(data))
-  focusCellAfterRender(view, idx + 1, 0)
 }
 
-/** 删除表体第 ri 行（0 基） */
-function deleteRowAt(view: EditorView, block: TableBlock, wrap: HTMLElement, ri: number): void {
+/** 删除表体第 ri 行（0 基）；focusCol 让光标留在原来的列 */
+function deleteRowAt(
+  view: EditorView,
+  block: TableBlock,
+  wrap: HTMLElement,
+  ri: number,
+  focusCol = 0
+): void {
   const data = readTableFromDOM(wrap, block.aligns)
   if (ri < 0 || ri >= data.rows.length) return
   data.rows.splice(ri, 1)
-  replaceTableBlock(view, block, buildTableLines(data))
   // 删完还有行就停在原位置（原来那行的下一行顶上来）；全删光就回到表头
   const next = Math.min(ri, data.rows.length - 1)
-  focusCellAfterRender(view, next >= 0 ? next + 1 : 0, 0)
+  const col = Math.min(Math.max(focusCol, 0), data.header.length - 1)
+  focusCellAfterRender(view, next >= 0 ? next + 1 : 0, col)
+  replaceTableBlock(view, block, buildTableLines(data))
 }
 
 /** 删除第 ci 列；至少保留一列 —— 零列表格不是合法 Markdown */
@@ -864,9 +886,9 @@ function deleteColumnAt(
   data.header.splice(ci, 1)
   for (const r of data.rows) r.splice(ci, 1)
   data.aligns.splice(ci, 1)
-  replaceTableBlock(view, block, buildTableLines(data))
   const col = Math.min(Math.max(ci - 1, 0), data.header.length - 1)
   focusCellAfterRender(view, Math.min(Math.max(focusRow, 0), data.rows.length), col)
+  replaceTableBlock(view, block, buildTableLines(data))
 }
 
 /** 设置某列对齐方式 */
@@ -881,8 +903,8 @@ function setColumnAlign(
   const data = readTableFromDOM(wrap, block.aligns)
   if (ci < 0 || ci >= data.header.length) return
   data.aligns[ci] = align
-  replaceTableBlock(view, block, buildTableLines(data))
   focusCellAfterRender(view, Math.min(Math.max(focusRow, 0), data.rows.length), ci)
+  replaceTableBlock(view, block, buildTableLines(data))
 }
 
 /**
@@ -936,7 +958,7 @@ function onCellKey(e: KeyboardEvent, view: EditorView, block: TableBlock, wrap: 
       return
     }
     if (row < bodyRows) go(row + 1, col)
-    else insertRowAt(view, block, wrap, bodyRows) // 最后一行回车 → 再加一行
+    else insertRowAt(view, block, wrap, bodyRows, col) // 最后一行回车 → 再加一行（留在原列）
     return
   }
 
@@ -975,8 +997,27 @@ class TableWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const wrap = el('div', 'cm-md-table-wrap')
 
-    /** 当前操作目标单元格（由 hover / focus 决定），菜单操作以它为准 */
-    let active = { row: 0, col: 0 }
+    // ---- 行列操作的「目标单元格」：光标优先，悬停兜底 ----
+    //
+    // ⚠️ 光标和悬停必须是**两个独立状态**，不能像早期实现那样都写进同一个 active。
+    // 原因很具体：右上角「⋯」在表格右侧留白里，鼠标从单元格移过去时会划过别的格，
+    // 每次 mouseover 都覆盖目标 —— 于是「光标在第 1 列、删的却是第 2 列」。
+    // 正确语义：有光标就跟光标；没有光标（只是鼠标在对面上滑）才退回悬停格。
+    let caret: { row: number; col: number } | null = null
+    let hover: { row: number; col: number } | null = null
+    const target = (): { row: number; col: number } => caret ?? hover ?? { row: 0, col: 0 }
+
+    /** 整列淡色定位：跟随光标；没有光标时才跟随悬停 */
+    const paintColumn = (col: number | null): void => {
+      for (const c of Array.from(wrap.querySelectorAll<HTMLElement>('.cm-md-cell'))) {
+        c.classList.toggle('is-col-hover', col !== null && Number(c.dataset.col) === col)
+      }
+    }
+    const cellOf = (t: EventTarget | null): HTMLElement | null => {
+      const e = t as Element | null
+      const cell = e?.closest?.('.cm-md-cell') as HTMLElement | null
+      return cell && wrap.contains(cell) ? cell : null
+    }
 
     const colCount = (): number => wrap.querySelectorAll('thead th').length
 
@@ -1035,47 +1076,49 @@ class TableWidget extends WidgetType {
     addTitle('插入')
     addItem({
       label: '在上方插入行',
-      run: () => insertRowAt(view, this.block, wrap, Math.max(0, active.row - 1)),
+      // 光标在表头时「上方」不存在：置灰，避免按下去实际插到表头下面
+      disabled: () => target().row < 1,
+      run: () => insertRowAt(view, this.block, wrap, target().row - 1, target().col),
     })
     addItem({
       label: '在下方插入行',
-      run: () => insertRowAt(view, this.block, wrap, Math.max(0, active.row)),
+      run: () => insertRowAt(view, this.block, wrap, Math.max(0, target().row), target().col),
     })
     addItem({
       label: '在左侧插入列',
-      run: () => insertColumnAt(view, this.block, wrap, active.col, active.row),
+      run: () => insertColumnAt(view, this.block, wrap, target().col, target().row),
     })
     addItem({
       label: '在右侧插入列',
-      run: () => insertColumnAt(view, this.block, wrap, active.col + 1, active.row),
+      run: () => insertColumnAt(view, this.block, wrap, target().col + 1, target().row),
     })
     addDivider()
     addTitle('删除')
     addItem({
       label: '删除当前行',
       danger: true,
-      disabled: () => active.row < 1,
-      run: () => deleteRowAt(view, this.block, wrap, active.row - 1),
+      disabled: () => target().row < 1,
+      run: () => deleteRowAt(view, this.block, wrap, target().row - 1, target().col),
     })
     addItem({
       label: '删除当前列',
       danger: true,
       disabled: () => colCount() <= 1,
-      run: () => deleteColumnAt(view, this.block, wrap, active.col, active.row),
+      run: () => deleteColumnAt(view, this.block, wrap, target().col, target().row),
     })
     addDivider()
     addTitle('对齐')
     addItem({
       label: '左对齐',
-      run: () => setColumnAlign(view, this.block, wrap, active.col, 'left', active.row),
+      run: () => setColumnAlign(view, this.block, wrap, target().col, 'left', target().row),
     })
     addItem({
       label: '居中对齐',
-      run: () => setColumnAlign(view, this.block, wrap, active.col, 'center', active.row),
+      run: () => setColumnAlign(view, this.block, wrap, target().col, 'center', target().row),
     })
     addItem({
       label: '右对齐',
-      run: () => setColumnAlign(view, this.block, wrap, active.col, 'right', active.row),
+      run: () => setColumnAlign(view, this.block, wrap, target().col, 'right', target().row),
     })
     addDivider()
     addItem({ label: '复制表格', run: () => copyTable(view, this.block) })
@@ -1142,7 +1185,7 @@ class TableWidget extends WidgetType {
     colAdd.addEventListener('click', (e) => {
       e.preventDefault()
       e.stopPropagation()
-      insertColumnAt(view, this.block, wrap, this.block.header.cells.length, active.row)
+      insertColumnAt(view, this.block, wrap, this.block.header.cells.length, target().row)
     })
     wrap.appendChild(colAdd)
 
@@ -1160,42 +1203,27 @@ class TableWidget extends WidgetType {
     rowAdd.addEventListener('click', (e) => {
       e.preventDefault()
       e.stopPropagation()
-      insertRowAt(view, this.block, wrap, this.block.rows.length)
+      insertRowAt(view, this.block, wrap, this.block.rows.length, target().col)
     })
     wrap.appendChild(rowAdd)
 
-    // ---- 悬停 / 聚焦：记录当前单元格，并做整列淡色定位 ----
-    let hovRow = -1
-    let hovCol = -1
-    const setHover = (row: number, col: number): void => {
-      active = { row, col }
-      if (row === hovRow && col === hovCol) return
-      hovRow = row
-      hovCol = col
-      for (const c of Array.from(wrap.querySelectorAll<HTMLElement>('.cm-md-cell'))) {
-        c.classList.toggle('is-col-hover', Number(c.dataset.col) === col)
-      }
-    }
-    const clearHover = (): void => {
-      hovRow = -1
-      hovCol = -1
-      for (const c of Array.from(wrap.querySelectorAll<HTMLElement>('.is-col-hover'))) {
-        c.classList.remove('is-col-hover')
-      }
-    }
-    const cellOf = (target: EventTarget | null): HTMLElement | null => {
-      const e = target as Element | null
-      const cell = e?.closest?.('.cm-md-cell') as HTMLElement | null
-      return cell && wrap.contains(cell) ? cell : null
-    }
+    // ---- 光标 / 悬停：分别记录，操作目标由 target() 统一裁决 ----
     wrap.addEventListener('mouseover', (e) => {
       const cell = cellOf(e.target)
-      if (cell) setHover(Number(cell.dataset.row), Number(cell.dataset.col))
+      if (!cell) return
+      hover = { row: Number(cell.dataset.row), col: Number(cell.dataset.col) }
+      // 有光标时，列高亮跟着光标走 —— 否则「高亮的列」和「操作的列」会不是同一列
+      if (!caret) paintColumn(hover.col)
     })
-    wrap.addEventListener('mouseleave', clearHover)
+    wrap.addEventListener('mouseleave', () => {
+      hover = null
+      if (!caret) paintColumn(null)
+    })
     wrap.addEventListener('focusin', (e) => {
       const cell = cellOf(e.target)
-      if (cell) setHover(Number(cell.dataset.row), Number(cell.dataset.col))
+      if (!cell) return
+      caret = { row: Number(cell.dataset.row), col: Number(cell.dataset.col) }
+      paintColumn(caret.col)
     })
 
     // 点击表格其它区域时收起菜单
@@ -1203,10 +1231,12 @@ class TableWidget extends WidgetType {
       if (!tools.contains(e.target as Node)) closeMenu()
     })
 
-    // 焦点离开表格（移到表格外）时，把未提交的单元格改动落盘
+    // 焦点离开时：① 清掉光标（列高亮交回悬停）；② 把未提交的单元格改动落盘
     wrap.addEventListener('focusout', (e: FocusEvent) => {
       const related = e.relatedTarget as Node | null
       if (related && wrap.contains(related)) return // 仍在同一表内（切到另一格 / 点按钮），不提交
+      caret = null
+      paintColumn(hover ? hover.col : null)
       commitTableIfChanged(view, this.block, wrap)
     })
 
