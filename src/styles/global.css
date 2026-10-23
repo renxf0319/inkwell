@@ -665,8 +665,12 @@ body.resizing-col * {
 
 /* ---------------- 表格 ----------------
    整块表格由 Decoration.replace 换成一个真 <table>（见 lib/wysiwyg.ts 的 TableWidget），
-   所以这里的样式同时要满足两个场景：
-     1. Widget 渲染态 —— .cm-md-table-wrap > table.cm-md-table
+   视觉/交互对齐语雀：
+     - 浅灰细网格 + 表头浅底，单元格垂直居中，行/列悬停淡色定位
+     - 插入控件只放在表格右侧留白（列「+」）和底部留白（行「+」），
+       悬停才显形；**单元格里没有任何按钮**，也就不可能再污染单元格文本
+     - 右上角「⋯」菜单做精确操作：上下插行 / 左右插列 / 删除 / 对齐 / 复制
+     1. Widget 渲染态 —— .cm-md-table-wrap > .cm-md-table-scroll > table.cm-md-table
      2. 光标进表后的源码回落态 —— .cm-md-tr（此时只剩竖线文本，靠行样式提示「这是一张表」）
    ⚠️ 沿用上文那条约束：选择器必须同为「后代 + 单类」权重（0,2,0），
    否则会被 .cm-gutters/.cm-line 的 padding 规则整条盖掉。 */
@@ -688,102 +692,122 @@ body.resizing-col * {
    *   margin: 0; padding: 0.6em 0 → 偏移 0px / 0px        → 0/79 ✓（间距照旧保留）
    *
    * 结论：**纵向间距一律用 padding 表达，不用 margin**。
-   * padding 属于盒子的一部分，CM 量得到，视觉上与 margin 等价。 */
+   * padding 属于盒子的一部分，CM 量得到，视觉上与 margin 等价。
+   *
+   * 右侧 26px / 底部 22px 是给控件留的位置（列「+」、行「+」），
+   * 控件绝对定位在 padding 里，永远不会压住单元格内容。 */
   margin: 0;
-  padding: 0.25em;
-  /* 外框 + 圆角：整张表的轮廓由 wrap 统一画，内部单元格只留分隔线，
-     不再是每格一圈的「铁丝网」观感 */
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  /* 表格可能比正文窄栏宽，给一层横向滚动，别把整行撑破布局 */
+  padding: 0.5em 26px 22px 0;
+  position: relative;
+  /* 菜单要能溢出表格，所以这里不能裁剪；横向滚动交给 .cm-md-table-scroll */
+  overflow: visible;
+}
+
+/* 横向滚动只包住表格本体，控件和菜单留在 wrap 上，才不会被裁掉 */
+.editor-host .cm-md-table-scroll {
   overflow-x: auto;
   overflow-y: hidden;
-  /* 工具栏与行列「+」按钮需要相对表格定位 */
-  position: relative;
 }
 /* 细滚动条：原生滚动条的箭头按钮又粗又丑，换成一条安静的细条 */
-.editor-host .cm-md-table-wrap::-webkit-scrollbar {
+.editor-host .cm-md-table-scroll::-webkit-scrollbar {
   height: 8px;
 }
-.editor-host .cm-md-table-wrap::-webkit-scrollbar-button {
+.editor-host .cm-md-table-scroll::-webkit-scrollbar-button {
   display: none;
 }
-.editor-host .cm-md-table-wrap::-webkit-scrollbar-track {
+.editor-host .cm-md-table-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
-.editor-host .cm-md-table-wrap::-webkit-scrollbar-thumb {
+.editor-host .cm-md-table-scroll::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--border) 80%, transparent);
   border-radius: 4px;
 }
-.editor-host .cm-md-table-wrap::-webkit-scrollbar-thumb:hover {
+.editor-host .cm-md-table-scroll::-webkit-scrollbar-thumb:hover {
   background: var(--border);
 }
+
 .editor-host .cm-md-table {
+  /* separate + spacing:0：每格自己画右/下边线，不会像 collapse 那样叠成 2px 粗线 */
   border-collapse: separate;
   border-spacing: 0;
   width: 100%;
   margin: 0;
   font-size: 0.95em;
   line-height: 1.6;
+  /* 外框与圆角由表格自己画，四角单元格再单独圆角对齐 */
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 .editor-host .cm-md-table th,
 .editor-host .cm-md-table td {
   border: none;
-  /* 竖向分隔线（每格左缘）+ 行间横线（每格上缘），
-     外圈轮廓由 wrap 的边框负责，这里不再重复画 */
-  box-shadow:
-    inset 1px 0 0 var(--border),
-    0 -1px 0 var(--border);
-  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  /* 竖向分隔线比横线更淡：视觉上先分行、再分列，语雀就是这个层次 */
+  border-right: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  padding: 8px 13px;
   /* 单元格内容长短不一时，窄列里的长路径/长串要能断行，否则会把表格撑得很宽 */
   word-break: break-word;
-  vertical-align: top;
+  /* 语雀式垂直居中 */
+  vertical-align: middle;
   text-align: left;
-  /* 行列「+」按钮相对单元格定位，且不被内容溢出裁掉 */
-  position: relative;
-  overflow: visible;
 }
-/* 首列去掉左侧竖线，避免与 wrap 左边框贴出双线 */
-.editor-host .cm-md-table th:first-child,
-.editor-host .cm-md-table td:first-child {
-  box-shadow: 0 -1px 0 var(--border);
+.editor-host .cm-md-table th:last-child,
+.editor-host .cm-md-table td:last-child {
+  border-right: none;
+}
+.editor-host .cm-md-table tbody tr:last-child td {
+  border-bottom: none;
 }
 .editor-host .cm-md-table th {
-  background: color-mix(in srgb, var(--bg-elev) 60%, var(--accent-soft));
+  background: color-mix(in srgb, var(--bg-elev) 55%, transparent);
   color: var(--heading-fg);
   font-weight: 600;
   white-space: nowrap;
-  /* 表头底线加重（2px 主色调）：整张表的视觉锚点在顶部 */
-  box-shadow:
-    inset 1px 0 0 var(--border),
-    0 2px 0 color-mix(in srgb, var(--accent) 50%, var(--border));
 }
-.editor-host .cm-md-table th:first-child {
-  box-shadow: 0 2px 0 color-mix(in srgb, var(--accent) 50%, var(--border));
+/* 四角圆角：贴合表格自身的 8px 圆角 */
+.editor-host .cm-md-table thead th:first-child {
+  border-top-left-radius: 7px;
 }
-/* 斑马纹：宽表横向扫行时能对上列。浅到不干扰阅读 */
-.editor-host .cm-md-table tbody tr:nth-child(even) {
-  background: color-mix(in srgb, var(--bg-elev) 45%, transparent);
+.editor-host .cm-md-table thead th:last-child {
+  border-top-right-radius: 7px;
 }
-/* 悬停行高亮：宽表里鼠标扫到哪行看哪行 */
-.editor-host .cm-md-table tbody tr:hover {
-  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+.editor-host .cm-md-table tbody tr:last-child td:first-child {
+  border-bottom-left-radius: 7px;
+}
+.editor-host .cm-md-table tbody tr:last-child td:last-child {
+  border-bottom-right-radius: 7px;
+}
+/* 表体被删空（只剩表头 + 分隔行）时，表头同时承担底角圆角 */
+.editor-host .cm-md-table:not(:has(tbody tr)) thead th:first-child {
+  border-bottom-left-radius: 7px;
+}
+.editor-host .cm-md-table:not(:has(tbody tr)) thead th:last-child {
+  border-bottom-right-radius: 7px;
+}
+
+/* 行悬停：宽表里鼠标扫到哪行看哪行 */
+.editor-host .cm-md-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent-soft) 38%, transparent);
+}
+/* 列悬停：先用 mouseover 在 JS 里标出同一列，形成 Excel/语雀式淡色十字
+   （权重低于上面的 tr:hover，行高亮优先，列色在其余行上显出来） */
+.editor-host .cm-md-table td.is-col-hover {
+  background: color-mix(in srgb, var(--accent-soft) 22%, transparent);
 }
 /* 单元格内的行内标记：沿用全局样式，但去掉行内代码的行内 padding 会显得挤 */
 .editor-host .cm-md-table .cm-md-code {
   padding: 1px 4px;
 }
 
-/* --- 可交互表格：就地编辑的单元格 + 左上角工具栏 + 行列「+」按钮 --- */
+/* --- 可交互表格：就地编辑的单元格 + 右上角菜单 + 右侧/底部插入按钮 --- */
 .editor-host .cm-md-cell {
   outline: none;
   min-width: 3em;
 }
-/* 单元格内容层：落盘读取（readCellText）只认这一层，
-   行/列「+」按钮是它的兄弟节点，永远不会混进单元格文本 */
+/* 单元格内容层：落盘读取（readCellText）只认这一层 */
 .editor-host .cm-md-cell-content {
   display: block;
-  min-height: 1.4em;
+  min-height: 1.5em;
 }
 .editor-host .cm-md-cell:focus {
   outline: 2px solid var(--accent);
@@ -791,12 +815,12 @@ body.resizing-col * {
   border-radius: 2px;
 }
 
-/* 左上角「编辑表格」按钮：浮在表格左上角，点开复制 / 剪切 / 删除 整张表 */
+/* 右上角「⋯」：放在 wrap 的右侧留白里，不遮挡任何单元格 */
 .editor-host .cm-md-table-tools {
   position: absolute;
-  top: 4px;
-  left: 4px;
-  z-index: 5;
+  top: 2px;
+  right: 2px;
+  z-index: 7;
 }
 .editor-host .cm-md-table-tools-btn {
   width: 22px;
@@ -804,46 +828,64 @@ body.resizing-col * {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
   border-radius: 4px;
   background: var(--bg-elev);
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   color: var(--fg);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1;
-  /* 悬停显形：工具按钮和行列「+」一样，鼠标进表才出现，不常驻遮挡首格 */
+  /* 悬停显形，不常驻 */
   opacity: 0;
-  transition: opacity 0.12s;
-  /* 发起动作的按钮，保留手型 */
-  cursor: pointer;
   pointer-events: none;
+  cursor: pointer;
+  transition:
+    opacity 0.12s,
+    border-color 0.12s,
+    color 0.12s;
 }
-/* 鼠标在表格上时按钮才可点（配合 opacity 过渡，避免透明层挡点击） */
 .editor-host .cm-md-table-wrap:hover .cm-md-table-tools-btn {
-  opacity: 0.9;
+  opacity: 0.75;
   pointer-events: auto;
 }
 .editor-host .cm-md-table-tools-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
   opacity: 1;
+  border-color: var(--border);
+  color: var(--accent);
 }
+
+/* 菜单：分组标题 + 分隔线的语雀式弹出面板，从右侧展开 */
 .editor-host .cm-md-table-menu {
   position: absolute;
   top: 26px;
-  left: 0;
-  min-width: 120px;
-  padding: 4px;
+  right: 0;
+  min-width: 176px;
+  padding: 5px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   box-shadow: var(--shadow-lg);
-  z-index: 6;
+  z-index: 8;
+}
+.editor-host .cm-md-table-menu-title {
+  padding: 5px 8px 2px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--fg);
+  opacity: 0.45;
+}
+.editor-host .cm-md-table-menu-divider {
+  height: 1px;
+  margin: 5px 6px;
+  background: var(--border);
 }
 .editor-host .cm-md-table-menu-item {
   display: block;
   width: 100%;
-  padding: 6px 10px;
-  border-radius: 4px;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 5px;
   text-align: left;
   font-size: 13px;
   color: var(--fg);
@@ -853,46 +895,68 @@ body.resizing-col * {
   background: var(--accent-soft);
   color: var(--accent);
 }
+.editor-host .cm-md-table-menu-item[aria-disabled='true'] {
+  opacity: 0.35;
+  pointer-events: none;
+}
+.editor-host .cm-md-table-menu-item.is-danger {
+  color: var(--danger);
+}
+.editor-host .cm-md-table-menu-item.is-danger:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
 
-/* 行列分隔线上的「+」：默认淡隐，鼠标移到表格上才显形 */
+/* 列「+」/ 行「+」：只在表格悬停时出现，各最多一个 */
 .editor-host .cm-md-col-add,
 .editor-host .cm-md-row-add {
   position: absolute;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 6px;
   background: var(--bg-elev);
-  border: 1px solid var(--accent);
-  color: var(--accent);
-  font-size: 13px;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-size: 15px;
   line-height: 1;
   opacity: 0;
+  pointer-events: none;
   cursor: pointer;
-  z-index: 4;
-  transition: opacity 0.12s;
+  z-index: 5;
+  transition:
+    opacity 0.12s,
+    border-color 0.12s,
+    color 0.12s,
+    background 0.12s;
 }
 .editor-host .cm-md-table-wrap:hover .cm-md-col-add,
 .editor-host .cm-md-table-wrap:hover .cm-md-row-add {
-  opacity: 0.9;
+  opacity: 1;
+  pointer-events: auto;
 }
 .editor-host .cm-md-col-add:hover,
 .editor-host .cm-md-row-add:hover {
-  opacity: 1;
-  background: var(--accent);
-  color: #fff;
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
 }
-/* 列「+」贴在每列表头右缘（列分隔线）；行「+」贴在每行首格底边（行分隔线） */
+/* 列「+」竖排在右侧留白，避开顶部菜单按钮，垂直居中于表格高度
+   （bottom 取 6px 而非对齐表格底边：只有表头的极短表格里也不会被挤出去） */
 .editor-host .cm-md-col-add {
-  right: 2px;
-  top: 50%;
-  transform: translateY(-50%);
+  right: 3px;
+  top: 30px;
+  bottom: 6px;
+  height: 20px;
+  margin-block: auto;
 }
+/* 行「+」在底部留白，与表格左缘对齐 */
 .editor-host .cm-md-row-add {
-  left: 2px;
-  bottom: 2px;
+  left: 0;
+  bottom: 1px;
 }
 
 /* --- 源码回落态：光标进入表格后，逐行显示原始竖线 --- */

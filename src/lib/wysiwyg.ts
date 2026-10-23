@@ -723,11 +723,11 @@ function cellText(node: Element | null): string {
 /**
  * 从单元格 DOM 读回**纯内容**文本。
  *
- * ⚠️ 必须只读 `.cm-md-cell-content` 子层，绝不能读整个单元格的 textContent：
- * 单元格里还挂着行/列「+」按钮（.cm-md-col-add / .cm-md-row-add），
- * 它们的文字恰好就是 "+"。曾经直接读 td.textContent 落盘，
- * 结果每提交一次就往 Markdown 里写进一批 "+"，下次渲染再叠加 ——
- * 单元格被滚雪球式污染成 "++++++++"。这是结构事故，不是样式问题。
+ * 只读 `.cm-md-cell-content` 子层：单元格里除了内容还可能挂装饰/控件，
+ * 直接取 td.textContent 会把它们的文字一起写回 Markdown。
+ * v0.3.14 就踩过 —— 当时行/列「+」按钮挂在单元格里，文字恰好是 "+"，
+ * 每次落盘都往 Markdown 写进一批 "+"，单元格累积成 "++++++++"。
+ * 现在插入按钮已经移到表格外侧，但这个读法继续保持「只认内容层」。
  */
 function readCellText(cell: Element | null): string {
   return cellText(cell?.querySelector(':scope > .cm-md-cell-content') ?? null)
@@ -796,33 +796,153 @@ function deleteTable(view: EditorView, block: TableBlock): void {
   view.dispatch({ changes: { from, to: end, insert: '' }, selection: { anchor: from } })
 }
 
-/** 在 col 列右侧插入一列 */
-function addColumn(view: EditorView, block: TableBlock, wrap: HTMLElement, col: number): void {
-  const data = readTableFromDOM(wrap, block.aligns)
-  const at = col + 1
-  data.header.splice(at, 0, '')
-  for (const r of data.rows) r.splice(at, 0, '')
-  data.aligns.splice(at, 0, null)
-  replaceTableBlock(view, block, buildTableLines(data))
-  focusCellAfterRender(view, 0, at)
+/** 按 (row, col) 找单元格；row=0 是表头，1 起是表体 */
+function cellNode(wrap: HTMLElement, row: number, col: number): HTMLElement | null {
+  return wrap.querySelector<HTMLElement>(`.cm-md-cell[data-row="${row}"][data-col="${col}"]`)
 }
 
-/** 在 rowIdx 行（0 基，不含表头）下方插入一行 */
-function addRow(view: EditorView, block: TableBlock, wrap: HTMLElement, rowIdx: number): void {
-  const data = readTableFromDOM(wrap, block.aligns)
-  const at = rowIdx + 1
-  data.rows.splice(at, 0, Array.from({ length: data.header.length }, () => ''))
-  replaceTableBlock(view, block, buildTableLines(data))
-  focusCellAfterRender(view, at + 1, 0)
+/** 聚焦单元格，并把光标放到内容末尾（atEnd=false 时放到开头） */
+function focusCellNode(node: HTMLElement, atEnd = true): void {
+  node.focus()
+  const sel = window.getSelection()
+  if (!sel) return
+  const target = node.querySelector('.cm-md-cell-content') ?? node
+  const range = document.createRange()
+  range.selectNodeContents(target)
+  range.collapse(!atEnd)
+  sel.removeAllRanges()
+  sel.addRange(range)
 }
 
-/** 单元格内按键：阻止会穿透到 CodeMirror 的少数按键，保存类快捷键先落盘再放行 */
+/** 在列索引 at 处（0..列数）插入一列；focusRow 决定插入后光标回到哪一行 */
+function insertColumnAt(
+  view: EditorView,
+  block: TableBlock,
+  wrap: HTMLElement,
+  at: number,
+  focusRow = 0
+): void {
+  const data = readTableFromDOM(wrap, block.aligns)
+  const idx = Math.min(Math.max(at, 0), data.header.length)
+  data.header.splice(idx, 0, '')
+  for (const r of data.rows) r.splice(idx, 0, '')
+  data.aligns.splice(idx, 0, null)
+  replaceTableBlock(view, block, buildTableLines(data))
+  focusCellAfterRender(view, Math.min(Math.max(focusRow, 0), data.rows.length), idx)
+}
+
+/** 在表体行索引 at 处（0..行数）插入一行；at=0 表示表头正下方 */
+function insertRowAt(view: EditorView, block: TableBlock, wrap: HTMLElement, at: number): void {
+  const data = readTableFromDOM(wrap, block.aligns)
+  const idx = Math.min(Math.max(at, 0), data.rows.length)
+  data.rows.splice(idx, 0, Array.from({ length: data.header.length }, () => ''))
+  replaceTableBlock(view, block, buildTableLines(data))
+  focusCellAfterRender(view, idx + 1, 0)
+}
+
+/** 删除表体第 ri 行（0 基） */
+function deleteRowAt(view: EditorView, block: TableBlock, wrap: HTMLElement, ri: number): void {
+  const data = readTableFromDOM(wrap, block.aligns)
+  if (ri < 0 || ri >= data.rows.length) return
+  data.rows.splice(ri, 1)
+  replaceTableBlock(view, block, buildTableLines(data))
+  // 删完还有行就停在原位置（原来那行的下一行顶上来）；全删光就回到表头
+  const next = Math.min(ri, data.rows.length - 1)
+  focusCellAfterRender(view, next >= 0 ? next + 1 : 0, 0)
+}
+
+/** 删除第 ci 列；至少保留一列 —— 零列表格不是合法 Markdown */
+function deleteColumnAt(
+  view: EditorView,
+  block: TableBlock,
+  wrap: HTMLElement,
+  ci: number,
+  focusRow = 0
+): void {
+  const data = readTableFromDOM(wrap, block.aligns)
+  if (data.header.length <= 1 || ci < 0 || ci >= data.header.length) return
+  data.header.splice(ci, 1)
+  for (const r of data.rows) r.splice(ci, 1)
+  data.aligns.splice(ci, 1)
+  replaceTableBlock(view, block, buildTableLines(data))
+  const col = Math.min(Math.max(ci - 1, 0), data.header.length - 1)
+  focusCellAfterRender(view, Math.min(Math.max(focusRow, 0), data.rows.length), col)
+}
+
+/** 设置某列对齐方式 */
+function setColumnAlign(
+  view: EditorView,
+  block: TableBlock,
+  wrap: HTMLElement,
+  ci: number,
+  align: Align,
+  focusRow = 0
+): void {
+  const data = readTableFromDOM(wrap, block.aligns)
+  if (ci < 0 || ci >= data.header.length) return
+  data.aligns[ci] = align
+  replaceTableBlock(view, block, buildTableLines(data))
+  focusCellAfterRender(view, Math.min(Math.max(focusRow, 0), data.rows.length), ci)
+}
+
+/**
+ * 单元格内按键。
+ *
+ * 除保存快捷键外，这里接管了表格的**键盘导航**（语雀式）：
+ *   Tab / Shift+Tab  依次前后移动单元格，走到最后一格自动追加一行
+ *   Enter / Shift+Enter  上下移动；最后一行的回车自动加行
+ * 其余按键只做 stopPropagation，避免穿透到 CodeMirror 触发整块重渲染。
+ */
 function onCellKey(e: KeyboardEvent, view: EditorView, block: TableBlock, wrap: HTMLElement): void {
+  if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey)) {
+    // 先落盘，再让全局保存快捷键继续生效
+    commitTableIfChanged(view, block, wrap)
+    return
+  }
+
+  const cell = e.target as HTMLElement
+  const row = Number(cell.dataset.row)
+  const col = Number(cell.dataset.col)
+  if (Number.isNaN(row) || Number.isNaN(col)) return
+
+  const cols = wrap.querySelectorAll('thead th').length
+  const bodyRows = wrap.querySelectorAll('tbody tr').length
+  const go = (r: number, c: number): boolean => {
+    const n = cellNode(wrap, r, c)
+    if (!n) return false
+    focusCellNode(n)
+    return true
+  }
+
+  if (e.key === 'Tab') {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.shiftKey) {
+      if (col > 0) go(row, col - 1)
+      else if (row > 0) go(row - 1, cols - 1)
+      return
+    }
+    if (col + 1 < cols) go(row, col + 1)
+    else if (row < bodyRows) go(row + 1, 0)
+    else insertRowAt(view, block, wrap, bodyRows) // 最后一格 Tab → 追加一行
+    return
+  }
+
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.shiftKey) {
+      if (row > 0) go(row - 1, col)
+      return
+    }
+    if (row < bodyRows) go(row + 1, col)
+    else insertRowAt(view, block, wrap, bodyRows) // 最后一行回车 → 再加一行
+    return
+  }
+
   const stop = new Set([
-    'Enter',
     'Backspace',
     'Delete',
-    'Tab',
     'ArrowUp',
     'ArrowDown',
     'ArrowLeft',
@@ -830,22 +950,19 @@ function onCellKey(e: KeyboardEvent, view: EditorView, block: TableBlock, wrap: 
     'Home',
     'End',
   ])
-  if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey)) {
-    // 先落盘，再让全局保存快捷键继续生效
-    commitTableIfChanged(view, block, wrap)
-    return
-  }
   if (stop.has(e.key)) e.stopPropagation()
 }
 
 /**
  * 整块表格 Widget（所见即所得，可就地编辑）。
  *
- * 交互：
- *  - 单元格 `contenteditable`，点哪格直接在哪格改字，表格**不会**回落成源码；
- *  - 左上角「编辑表格」按钮弹出菜单：复制 / 剪切 / 删除 整张表格；
- *  - 列分隔线（每列表头右缘）的「+」在右侧插入一列；
- *  - 行分隔线（每行首格底边）的「+」在下方插入一行。
+ * 设计对齐语雀：
+ *  - 浅灰细网格，单元格垂直居中，行悬停 + 列悬停淡色定位；
+ *  - **不再往单元格里塞「+」**：只在表格右侧留白放列「+」、底部留白放行「+」，
+ *    整张表最多两个插入按钮，悬停才显形（也彻底杜绝「+」污染单元格文本）；
+ *  - 右上角「⋯」菜单按**当前单元格**做精确操作：上下插行 / 左右插列 /
+ *    删除行列 / 列对齐 / 复制 / 删除表格；
+ *  - 单元格 `contenteditable`，Tab / Enter 键盘导航（见 onCellKey）。
  * 改动通过「离开表格时落盘 / 结构变动时重排」回写到纯 Markdown 源码。
  */
 class TableWidget extends WidgetType {
@@ -858,41 +975,120 @@ class TableWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const wrap = el('div', 'cm-md-table-wrap')
 
-    // ---- 左上角「编辑表格」工具按钮 + 菜单 ----
+    /** 当前操作目标单元格（由 hover / focus 决定），菜单操作以它为准 */
+    let active = { row: 0, col: 0 }
+
+    const colCount = (): number => wrap.querySelectorAll('thead th').length
+
+    // ---- 右上角「⋯」菜单 ----
     const tools = el('div', 'cm-md-table-tools')
     const toolsBtn = document.createElement('button')
     toolsBtn.type = 'button'
     toolsBtn.className = 'cm-md-table-tools-btn'
-    toolsBtn.textContent = '▦'
-    toolsBtn.title = '编辑表格'
-    toolsBtn.setAttribute('aria-label', '编辑表格')
+    toolsBtn.textContent = '⋯'
+    toolsBtn.title = '表格操作'
+    toolsBtn.setAttribute('aria-label', '表格操作')
+
     const menu = el('div', 'cm-md-table-menu')
     menu.style.display = 'none'
-    const mkItem = (label: string, fn: () => void): HTMLButtonElement => {
-      const it = document.createElement('button')
-      it.type = 'button'
-      it.className = 'cm-md-table-menu-item'
-      it.textContent = label
-      it.addEventListener('mousedown', (e) => {
-        e.preventDefault()
-        e.stopPropagation()
-      })
-      it.addEventListener('click', (e) => {
-        e.preventDefault()
-        e.stopPropagation()
-        menu.style.display = 'none'
-        fn()
-      })
-      return it
+
+    interface MenuItem {
+      label: string
+      run: () => void
+      disabled?: () => boolean
+      danger?: boolean
     }
-    menu.appendChild(mkItem('复制表格', () => copyTable(view, this.block)))
-    menu.appendChild(
-      mkItem('剪切表格', () => {
-        copyTable(view, this.block)
-        deleteTable(view, this.block)
+    const items: { node: HTMLButtonElement; item: MenuItem }[] = []
+
+    const closeMenu = (): void => {
+      menu.style.display = 'none'
+    }
+    const addTitle = (t: string): void => {
+      const d = el('div', 'cm-md-table-menu-title')
+      d.textContent = t
+      menu.appendChild(d)
+    }
+    const addDivider = (): void => {
+      menu.appendChild(el('div', 'cm-md-table-menu-divider'))
+    }
+    const addItem = (item: MenuItem): void => {
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.className = 'cm-md-table-menu-item' + (item.danger ? ' is-danger' : '')
+      b.textContent = item.label
+      // mousedown 必须挡住：否则点菜单会先让编辑器失焦、整表重渲染
+      b.addEventListener('mousedown', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
       })
-    )
-    menu.appendChild(mkItem('删除表格', () => deleteTable(view, this.block)))
+      b.addEventListener('click', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        if (b.getAttribute('aria-disabled') === 'true') return
+        closeMenu()
+        item.run()
+      })
+      menu.appendChild(b)
+      items.push({ node: b, item })
+    }
+
+    addTitle('插入')
+    addItem({
+      label: '在上方插入行',
+      run: () => insertRowAt(view, this.block, wrap, Math.max(0, active.row - 1)),
+    })
+    addItem({
+      label: '在下方插入行',
+      run: () => insertRowAt(view, this.block, wrap, Math.max(0, active.row)),
+    })
+    addItem({
+      label: '在左侧插入列',
+      run: () => insertColumnAt(view, this.block, wrap, active.col, active.row),
+    })
+    addItem({
+      label: '在右侧插入列',
+      run: () => insertColumnAt(view, this.block, wrap, active.col + 1, active.row),
+    })
+    addDivider()
+    addTitle('删除')
+    addItem({
+      label: '删除当前行',
+      danger: true,
+      disabled: () => active.row < 1,
+      run: () => deleteRowAt(view, this.block, wrap, active.row - 1),
+    })
+    addItem({
+      label: '删除当前列',
+      danger: true,
+      disabled: () => colCount() <= 1,
+      run: () => deleteColumnAt(view, this.block, wrap, active.col, active.row),
+    })
+    addDivider()
+    addTitle('对齐')
+    addItem({
+      label: '左对齐',
+      run: () => setColumnAlign(view, this.block, wrap, active.col, 'left', active.row),
+    })
+    addItem({
+      label: '居中对齐',
+      run: () => setColumnAlign(view, this.block, wrap, active.col, 'center', active.row),
+    })
+    addItem({
+      label: '右对齐',
+      run: () => setColumnAlign(view, this.block, wrap, active.col, 'right', active.row),
+    })
+    addDivider()
+    addItem({ label: '复制表格', run: () => copyTable(view, this.block) })
+    addItem({ label: '删除表格', danger: true, run: () => deleteTable(view, this.block) })
+
+    const openMenu = (): void => {
+      // 每次打开按当前单元格重算可用状态
+      for (const { node, item } of items) {
+        node.setAttribute('aria-disabled', item.disabled?.() ? 'true' : 'false')
+      }
+      menu.style.display = 'block'
+    }
+
     toolsBtn.addEventListener('mousedown', (e) => {
       e.preventDefault()
       e.stopPropagation()
@@ -900,76 +1096,117 @@ class TableWidget extends WidgetType {
     toolsBtn.addEventListener('click', (e) => {
       e.preventDefault()
       e.stopPropagation()
-      menu.style.display = menu.style.display === 'none' ? 'block' : 'none'
+      if (menu.style.display === 'none') openMenu()
+      else closeMenu()
     })
     tools.appendChild(toolsBtn)
     tools.appendChild(menu)
     wrap.appendChild(tools)
 
-    // 点击表格其它区域时收起菜单
-    wrap.addEventListener('mousedown', () => {
-      menu.style.display = 'none'
-    })
-
+    // ---- 表格本体 ----
+    // 横向滚动只包住表格，菜单/按钮留在 wrap 上，才不会被滚动容器裁掉
+    const scroller = el('div', 'cm-md-table-scroll')
     const table = el('table', 'cm-md-table')
 
-    // ---- 表头 + 列加号 ----
     const thead = document.createElement('thead')
     const htr = document.createElement('tr')
     this.block.header.cells.forEach((c, i) => {
-      const th = this.cellEl('th', c, i, 0, view, wrap)
-      htr.appendChild(th)
-      const add = el('span', 'cm-md-col-add')
-      add.textContent = '+'
-      add.title = '在右侧插入一列'
-      add.dataset.col = String(i)
-      add.addEventListener('mousedown', (e) => {
-        e.preventDefault()
-        e.stopPropagation()
-      })
-      add.addEventListener('click', (e) => {
-        e.preventDefault()
-        e.stopPropagation()
-        addColumn(view, this.block, wrap, i)
-      })
-      th.appendChild(add)
+      htr.appendChild(this.cellEl('th', c, i, 0, view, wrap))
     })
     thead.appendChild(htr)
     table.appendChild(thead)
 
-    // ---- 表体 + 行加号 ----
     const tbody = document.createElement('tbody')
     this.block.rows.forEach((row, ri) => {
       const tr = document.createElement('tr')
       row.cells.forEach((c, ci) => {
-        const td = this.cellEl('td', c, ci, ri + 1, view, wrap)
-        tr.appendChild(td)
-        if (ci === 0) {
-          const add = el('span', 'cm-md-row-add')
-          add.textContent = '+'
-          add.title = '在下方插入一行'
-          add.dataset.row = String(ri)
-          add.addEventListener('mousedown', (e) => {
-            e.preventDefault()
-            e.stopPropagation()
-          })
-          add.addEventListener('click', (e) => {
-            e.preventDefault()
-            e.stopPropagation()
-            addRow(view, this.block, wrap, ri)
-          })
-          td.appendChild(add)
-        }
+        tr.appendChild(this.cellEl('td', c, ci, ri + 1, view, wrap))
       })
       tbody.appendChild(tr)
     })
     table.appendChild(tbody)
-    wrap.appendChild(table)
+    scroller.appendChild(table)
+    wrap.appendChild(scroller)
+
+    // ---- 列「+」：右侧留白里，竖排在工具栏下方 ----
+    const colAdd = document.createElement('button')
+    colAdd.type = 'button'
+    colAdd.className = 'cm-md-col-add'
+    colAdd.textContent = '+'
+    colAdd.title = '在右侧插入一列'
+    colAdd.setAttribute('aria-label', '在右侧插入一列')
+    colAdd.addEventListener('mousedown', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+    })
+    colAdd.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      insertColumnAt(view, this.block, wrap, this.block.header.cells.length, active.row)
+    })
+    wrap.appendChild(colAdd)
+
+    // ---- 行「+」：底部留白里，与表格左缘对齐 ----
+    const rowAdd = document.createElement('button')
+    rowAdd.type = 'button'
+    rowAdd.className = 'cm-md-row-add'
+    rowAdd.textContent = '+'
+    rowAdd.title = '在下方插入一行'
+    rowAdd.setAttribute('aria-label', '在下方插入一行')
+    rowAdd.addEventListener('mousedown', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+    })
+    rowAdd.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      insertRowAt(view, this.block, wrap, this.block.rows.length)
+    })
+    wrap.appendChild(rowAdd)
+
+    // ---- 悬停 / 聚焦：记录当前单元格，并做整列淡色定位 ----
+    let hovRow = -1
+    let hovCol = -1
+    const setHover = (row: number, col: number): void => {
+      active = { row, col }
+      if (row === hovRow && col === hovCol) return
+      hovRow = row
+      hovCol = col
+      for (const c of Array.from(wrap.querySelectorAll<HTMLElement>('.cm-md-cell'))) {
+        c.classList.toggle('is-col-hover', Number(c.dataset.col) === col)
+      }
+    }
+    const clearHover = (): void => {
+      hovRow = -1
+      hovCol = -1
+      for (const c of Array.from(wrap.querySelectorAll<HTMLElement>('.is-col-hover'))) {
+        c.classList.remove('is-col-hover')
+      }
+    }
+    const cellOf = (target: EventTarget | null): HTMLElement | null => {
+      const e = target as Element | null
+      const cell = e?.closest?.('.cm-md-cell') as HTMLElement | null
+      return cell && wrap.contains(cell) ? cell : null
+    }
+    wrap.addEventListener('mouseover', (e) => {
+      const cell = cellOf(e.target)
+      if (cell) setHover(Number(cell.dataset.row), Number(cell.dataset.col))
+    })
+    wrap.addEventListener('mouseleave', clearHover)
+    wrap.addEventListener('focusin', (e) => {
+      const cell = cellOf(e.target)
+      if (cell) setHover(Number(cell.dataset.row), Number(cell.dataset.col))
+    })
+
+    // 点击表格其它区域时收起菜单
+    wrap.addEventListener('mousedown', (e) => {
+      if (!tools.contains(e.target as Node)) closeMenu()
+    })
 
     // 焦点离开表格（移到表格外）时，把未提交的单元格改动落盘
     wrap.addEventListener('focusout', (e: FocusEvent) => {
       const related = e.relatedTarget as Node | null
-      if (related && wrap.contains(related)) return // 仍在同一表内（切到另一格 / 点 + 按钮），不提交
+      if (related && wrap.contains(related)) return // 仍在同一表内（切到另一格 / 点按钮），不提交
       commitTableIfChanged(view, this.block, wrap)
     })
 
