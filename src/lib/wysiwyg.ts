@@ -29,7 +29,10 @@ interface Pending {
 }
 
 interface Ctx {
-  /** 光标所在行（1 起），-1 表示无焦点。**仅**用于表格的跨行块级判断 */
+  /**
+   * 光标所在行（1 起），-1 表示无焦点。
+   * 用途：表格的跨行块级判断 + 围栏行「光标在本行就露出原文」
+   */
   cursorLine: number
   /** 光标绝对位置：决定「这一处标记是否露出来」的**唯一**依据；-1 表示无焦点 */
   cursorPos: number
@@ -163,8 +166,40 @@ const UL_RE = /^(\s*)([-*+])(\s+)(.*)$/
 const OL_RE = /^(\s*)(\d{1,9})([.)])(\s+)(.*)$/
 const QUOTE_RE = /^(\s*(?:>\s?)+)(.*)$/
 const HR_RE = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/
-const FENCE_RE = /^\s{0,3}(`{3,}|~{3,})\s*(\S*)\s*$/
 const TASK_RE = /^(\s*)([-*+])(\s+)(\[[ xX]\])(\s*)(.*)$/
+
+/** 围栏行解析结果 */
+interface FenceInfo {
+  /** 行首缩进宽度（0~3） */
+  indent: number
+  /** 围栏标记本身（``` 或 ~~~，3 个起） */
+  marker: string
+  /** 完整 info string（可含空格，如 `js copy`） */
+  info: string
+  /** 取首个 token 作为语言标识（与 markdown-it 一致） */
+  lang: string
+}
+
+/**
+ * 识别围栏行。
+ *
+ * ⚠️ info string 必须允许空格：` ```js copy ` / ` ```python title=a.py ` 都是
+ * 合法围栏（CommonMark 里 info string 就是「语言 + 可选元信息」）。
+ * 老实现对 `(\S*)\s*$` 的限制会让这种行**不被当成围栏**，于是整块代码按普通
+ * 段落解析，更糟的是块末尾那个 ` ``` ` 反而被当成**开**围栏 ——
+ * 后面的正文全被染成代码样式，且因为开/闭错位，一直到文末都无法恢复。
+ *
+ * ⚠️ 反引号围栏的 info string 里不能再有反引号：那种行是行内代码
+ * （`` ```a``` ``），当成围栏会让整行凭空消失。
+ */
+function parseFence(lineText: string): FenceInfo | null {
+  const m = /^([ \t]{0,3})(`{3,}|~{3,})[ \t]*(.*?)[ \t]*$/.exec(lineText)
+  if (!m) return null
+  const marker = m[2]
+  const info = m[3]
+  if (marker[0] === '`' && info.includes('`')) return null
+  return { indent: m[1].length, marker, info, lang: info.split(/\s+/)[0] ?? '' }
+}
 
 /**
  * 行内规则。
@@ -235,6 +270,42 @@ const INLINE_RULES: InlineRule[] = [
 ]
 
 /**
+ * 围栏行的呈现（``` 或 ~~~）。
+ *
+ * 关键：**光标停在本行时必须露出原文**。
+ *
+ * 老实现无条件 `hide()` 整行，实测后果很具体：敲下第 3 个反引号的**那一瞬间**
+ * 这一行就变成空白灰条 —— 接着输入的语言名（`java`）改的全是看不见的文本：
+ *   - 打错没法发现、没法改；
+ *   - 点这一行时光标逻辑位置在行尾、画在行首，看着像「点哪都没反应」；
+ *   - 这时再敲字，` ```java ` 会变成 ` ```javaX `：语言标识被悄悄改坏，
+ *     而用户屏幕上什么都没变。
+ *
+ * 这与标题等块级前缀「一律隐藏」的取舍不同：围栏行只有语言标识这几个字，
+ * 露出来不影响阅读；不露出来，它就无法被编辑。
+ */
+function renderFenceLine(
+  ctx: Ctx,
+  lineText: string,
+  lineFrom: number,
+  lineNo: number,
+  lang: string
+): void {
+  addLine(ctx, lineFrom, 'cm-md-fence')
+  // 光标在本行：保留原文（语言标识直接可见可改），也不再挂右下角的语言标签
+  if (ctx.cursorLine === lineNo) return
+  hide(ctx, lineFrom, lineFrom + lineText.length)
+  if (lang) {
+    // 收起状态下，用右下角标签提示语言
+    ctx.out.push({
+      from: lineFrom + lineText.length,
+      to: lineFrom + lineText.length,
+      deco: Decoration.widget({ widget: new FenceLabel(lang), side: 1 }),
+    })
+  }
+}
+
+/**
  * 解析一行。
  * ctx.inFence / ctx.fenceMarker 表示**进入这一行之前**的围栏状态；
  * 围栏的开/关状态转移只在本函数内发生，调用方不需要再同步一遍。
@@ -243,30 +314,33 @@ function processLine(
   state: EditorState,
   ctx: Ctx,
   lineText: string,
-  lineFrom: number
+  lineFrom: number,
+  lineNo: number
 ): void {
   // --- 代码围栏：整块不做内联解析 ---
-  const fence = FENCE_RE.exec(lineText)
+  const fence = parseFence(lineText)
   if (fence) {
-    const marker = fence[1]
-    const lang = fence[2] || ''
-    if (ctx.inFence && marker[0] === ctx.fenceMarker[0]) {
-      ctx.inFence = false
-      ctx.fenceMarker = ''
-    } else {
-      ctx.inFence = true
-      ctx.fenceMarker = marker
-      if (lang) {
-        // 围栏行右端挂语言标签
-        ctx.out.push({
-          from: lineFrom + lineText.length,
-          to: lineFrom + lineText.length,
-          deco: Decoration.widget({ widget: new FenceLabel(lang), side: 1 }),
-        })
+    if (ctx.inFence) {
+      // 闭合判据（CommonMark）：同种标记、不短于开围栏、且**不能带 info string**。
+      // 少了后两条时，块里出现一行 ` ```js ` 或 ` ``` ` 就会提前闭合，
+      // 剩下的代码被当成正文，而真正的闭围栏又开了一个新块。
+      const closes =
+        fence.marker[0] === ctx.fenceMarker[0] &&
+        fence.marker.length >= ctx.fenceMarker.length &&
+        fence.info === ''
+      if (closes) {
+        ctx.inFence = false
+        ctx.fenceMarker = ''
+        renderFenceLine(ctx, lineText, lineFrom, lineNo, '')
+        return
       }
+      // 不是闭围栏 → 它只是围栏里的一行代码
+      addLine(ctx, lineFrom, 'cm-md-codeblock')
+      return
     }
-    addLine(ctx, lineFrom, 'cm-md-fence')
-    hide(ctx, lineFrom, lineFrom + lineText.length)
+    ctx.inFence = true
+    ctx.fenceMarker = fence.marker
+    renderFenceLine(ctx, lineText, lineFrom, lineNo, fence.lang)
     return
   }
 
@@ -1710,7 +1784,7 @@ function buildFrom(state: EditorState): DecorationSet {
       }
     }
 
-    processLine(state, ctx, line.text, line.from)
+    processLine(state, ctx, line.text, line.from, n)
   }
 
   // 记录本次的推导结果，供 update() 判断「下一次选区变化是否需要重算」。
@@ -1737,7 +1811,15 @@ function buildFrom(state: EditorState): DecorationSet {
 const setFocus = StateEffect.define<boolean>()
 
 const decoField = StateField.define<DecorationSet>({
-  create: (state) => buildFrom(state),
+  create: (state) => {
+    // 新视图刚建好时**一定还没有焦点**。focusProxy 是模块级变量，会带着上一个
+    // 视图的 true 值过来（比如切文档 / 换主题重建 EditorView）——
+    // 那会让新文档光标所在处（通常是第 1 行行首）的语法标记被当成「有光标」直接露出来，
+    // 与「打开已有文件不显示光标、也不显示原始语法」的约定相悖。
+    // 真正聚焦时 cursorSync 会补发 setFocus 效果，这里只管起点正确。
+    focusProxy = false
+    return buildFrom(state)
+  },
   update(decos, tr) {
     // 文档变了最重要：先按新文档重扫全文
     if (tr.docChanged) return buildFrom(tr.state)
