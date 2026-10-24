@@ -47,8 +47,6 @@ interface Ctx {
   /** 代码围栏内部：不做内联解析 */
   inFence: boolean
   fenceMarker: string
-  /** 当前开围栏所在行号（1 起）；不在围栏内为 0。给「未闭合围栏不吞表格」判定用 */
-  fenceOpenLine: number
 }
 
 function overlaps(claimed: [number, number][], from: number, to: number): boolean {
@@ -209,37 +207,11 @@ function parseFence(lineText: string): FenceInfo | null {
  * 少了后两条时，块里出现一行 ` ```js ` 或 ` ``` ` 就会提前闭合，
  * 剩下的代码被当成正文，而真正的闭围栏又开了一个新块。
  *
- * 抽成函数是因为有两个消费者：主扫描（processLine）和「哪些开围栏真的闭合了」
- * 的预扫（closedFenceOpenLines）。两处一旦判据漂移，表格显隐就会出现
- * 「主扫描认为在代码里、预扫认为已闭合」这种自相矛盾的状态。
+ * 独立成函数是为了让判据只有一个出处 —— 之前表格那侧算过一份「围栏是否闭合」，
+ * 两套判据一旦漂移就会出现「表格以为在代码里、围栏以为已闭合」的自相矛盾。
  */
 function fenceCloses(openMarker: string, f: FenceInfo): boolean {
   return f.marker[0] === openMarker[0] && f.marker.length >= openMarker.length && f.info === ''
-}
-
-/**
- * 预扫：找出「后面有匹配闭围栏」的开围栏行号（1 起）。
- *
- * 只服务于一条判定 —— 见 buildFrom 里「未闭合的围栏不吞表格」。
- * 做成惰性计算：文档里没有「未闭合围栏 + 表格」这种组合时，它一次都不会跑。
- */
-function closedFenceOpenLines(doc: EditorState['doc']): Set<number> {
-  const closed = new Set<number>()
-  let openLine = 0
-  let marker = ''
-  for (let n = 1; n <= doc.lines; n++) {
-    const f = parseFence(doc.line(n).text)
-    if (!f) continue
-    if (!openLine) {
-      openLine = n
-      marker = f.marker
-    } else if (fenceCloses(marker, f)) {
-      closed.add(openLine)
-      openLine = 0
-      marker = ''
-    }
-  }
-  return closed
 }
 
 /**
@@ -365,7 +337,6 @@ function processLine(
       if (fenceCloses(ctx.fenceMarker, fence)) {
         ctx.inFence = false
         ctx.fenceMarker = ''
-        ctx.fenceOpenLine = 0
         renderFenceLine(ctx, lineText, lineFrom, lineNo, '')
         return
       }
@@ -375,7 +346,6 @@ function processLine(
     }
     ctx.inFence = true
     ctx.fenceMarker = fence.marker
-    ctx.fenceOpenLine = lineNo
     renderFenceLine(ctx, lineText, lineFrom, lineNo, fence.lang)
     return
   }
@@ -1770,7 +1740,6 @@ function buildFrom(state: EditorState): DecorationSet {
     marks,
     inFence: false,
     fenceMarker: '',
-    fenceOpenLine: 0,
   }
 
   // 扫描范围是**整篇文档**，不用 visibleRanges。
@@ -1797,47 +1766,34 @@ function buildFrom(state: EditorState): DecorationSet {
     tableCache.set(n, parsed)
     return parsed
   }
-  /** 哪些开围栏真的有闭围栏（惰性：只有撞上「围栏 + 表格」才算） */
-  let closedOpens: Set<number> | null = null
-
   for (let n = 1; n <= endLine; n++) {
     const line = state.doc.line(n)
     ctx.claimed = []
 
-    // --- 表格：整块识别，整块跳过 ---
-    let block = tableAt(n)
-
     /*
-     * 未闭合的围栏不吞表格。
+     * --- 表格：整块识别，整块跳过 ---
      *
-     * 这一条是 user 报告「在表格上面打 ``` 会把表格污染」的根因处理。
-     * 按 CommonMark，没写完的围栏确实会一路吞到文末 —— 于是敲下第 3 个反引号的
-     * **那一瞬间**，下面整张表就被拆成一堆管道符：表格 widget 消失、行变成代码块。
-     * 内容其实没丢（删掉围栏行能逐字节复原，已实测），但屏幕上「表格被毁了」
-     * 的观感足以让人不敢继续输入。
+     * ⚠️ 表格的判定**不受围栏状态影响**：即使这一行落在某个 ``` 里面，也照样渲染成表格。
      *
-     * 所以对**还没闭合**的围栏做一次「就地截断」：遇到表格就从这里收口，
-     * 让表格继续以 widget 呈现，围栏里的代码行照旧按代码渲染。
+     * 这不是疏忽，是两次实测事故换来的不变量：
      *
-     * 注意只在「全文没有任何匹配闭围栏」时才这么做：
-     *   - 用户把围栏写完（闭围栏在表格之前）→ 表格本就该正常显示，不受影响；
-     *   - 用户故意把表格包进代码块（闭围栏在表格之后）→ 预扫能查到闭合行，
-     *     判定失效，回到严格 CommonMark，表格照样变成代码 —— 不偏离语义。
-     * 代价只剩一个：文档里长期留着一个没闭合的围栏时，编辑器把它当作
-     * 「还没写完」而不是「吞掉后面所有东西」，与 markdown-it 的导出结果不同。
-     * 这种文档本身是残缺的，让它可视可改比严格还原更有用。
+     *   用户把光标放到表格上方、敲下第 3 个反引号的那一瞬间，下面整张表就从 <table>
+     *   变回一堆 `| 列名 | 类型 |` —— 内容其实没丢（删掉围栏行能逐字节复原，已验证），
+     *   但屏幕上「表格被毁了」的观感足以让人不敢继续输入。
+     *
+     * 曾经试过更"聪明"的做法：只在全文找不到匹配闭围栏时才截断围栏。结果照样翻车 ——
+     * 文档里别处有代码块时（长篇技术文档几乎必然有），那个远处的 ``` 会被当成闭围栏，
+     * 于是判定「围栏已闭合」→ 表格照样被吞。判据依赖"远处有没有 ```"，用户根本
+     * 无法预期，比不修更糟。
+     *
+     * 所以规则收敛成一句可预期的硬约定：**表格永远是表格，围栏吞不掉它**。
+     * 代码行照旧按代码渲染，围栏状态也不因表格而改变 —— 不会连带影响表格之后的正文。
+     *
+     * 代价：没人能在围栏里展示"表格源码"（想展示就贴成截图或改缩进），
+     * 与 markdown-it 导出在这一点上不一致。衡量过：这种情况罕见且无害，
+     * 而表格被当场吞掉是每次写代码块都可能踩到的坑。
      */
-    if (block && ctx.inFence) {
-      closedOpens ??= closedFenceOpenLines(state.doc)
-      if (!closedOpens.has(ctx.fenceOpenLine)) {
-        ctx.inFence = false
-        ctx.fenceMarker = ''
-        ctx.fenceOpenLine = 0
-      } else {
-        // 真正的代码块里的一段「像表格」的代码：仍按代码渲染
-        block = null
-      }
-    }
+    const block = tableAt(n)
 
     if (block) {
       // 整块换成 <table>（`block: true` 整体替换）。表格始终以所见即所得形式呈现，
