@@ -9,7 +9,14 @@ edition = "2021"
 # CARGO_HOME / RUSTUP_HOME 指向非系统盘（见 README）。
 [lib]
 name = "kore_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 桌面端只留 rlib：main.rs 直接链接它即可。
+# staticlib / cdylib 仅用于 iOS / Android 嵌入，桌面端不需要。
+# 关键：在 -windows-gnu (MinGW) 下，cdylib 会让 rustc 自动导出全部 pub 符号，
+# Tauri 依赖树导出 >65535 个，撞上 PE 的 16 位导出序号上限
+# （ld: export ordinal too large / rust-lld: too many exported symbols）。
+# 去掉 cdylib 后不再生成 DLL 导出表，MinGW 链接即可通过。
+# 若日后要出移动端，把这行改回 ["staticlib", "cdylib", "rlib"]。
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

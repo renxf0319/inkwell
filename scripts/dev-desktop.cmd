@@ -14,7 +14,7 @@ powershell -ExecutionPolicy Bypass -File "%~dp0dev-desktop.ps1" %*
 if %errorlevel% neq 0 (
   echo.
   echo [dev-desktop] Startup did not finish (exit code %errorlevel%).
-  echo Check the error message above.
+  echo Full log saved to: dev-desktop.log (project root)
   echo If Rust is missing, install it first:
   echo     powershell -ExecutionPolicy Bypass -File scripts\install-rust.ps1
   pause

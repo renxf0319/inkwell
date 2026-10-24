@@ -20,8 +20,18 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Resolve the repo root FIRST: everything below (log path, CARGO_HOME, etc.)
+# depends on it. Defining $repo after it is used caused a null-argument fatal
+# error that aborted the launcher before any diagnostics could run.
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
+
+# Diagnostics: mirror all output to dev-desktop.log so a crash is never a silent
+# flash. Start-Transcript can be blocked under Constrained Language Mode; ignore
+# that failure and keep running.
+$logFile = Join-Path $repo "dev-desktop.log"
+try { Start-Transcript -Path $logFile -Append -ErrorAction Stop } catch { }
 
 function Resolve-RustHome {
   param([string]$Explicit)
@@ -92,6 +102,17 @@ $env:RUSTUP_HOME = $rustupHome
 $cargoBin = Join-Path $cargoHome "bin"
 if ((Test-Path $cargoBin) -and ($env:Path -notlike "*$cargoBin*")) {
   $env:Path = "$cargoBin;$env:Path"
+}
+
+# GNU/MinGW fallback for this machine: when the default MSVC linker (link.exe
+# from VS Build Tools) is absent, the cargo config at $CARGO_HOME points the
+# build at x86_64-pc-windows-gnu and we must put MinGW's bin on PATH so the
+# linker / archiver / windres (resource compiler) resolve. On a machine that
+# uses MSVC (no E:\mingw64), this is a no-op.
+$mingwBin = "E:\mingw64\bin"
+if ((Test-Path $mingwBin) -and ($env:Path -notlike "*$mingwBin*")) {
+  $env:Path = "$mingwBin;$env:Path"
+  Write-Host "[dev] GNU toolchain on PATH: $mingwBin"
 }
 
 Write-Host ""
