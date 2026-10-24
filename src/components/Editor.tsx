@@ -5,7 +5,6 @@ import {
   keymap,
   lineNumbers,
   highlightActiveLineGutter,
-  drawSelection,
   rectangularSelection,
   crosshairCursor,
 } from '@codemirror/view'
@@ -107,7 +106,23 @@ export default function Editor() {
       extensions: [
         lineNumbers(),
         highlightActiveLineGutter(),
-        drawSelection(),
+        /*
+         * ⚠️ 这里**故意不装** drawSelection()，换来的原生选区是刻意的取舍。
+         *
+         * drawSelection 把选区画在 `.cm-selectionLayer` 里，而这一层是 z-index:-2 ——
+         * 在内容层**下面**。凡是内容里带不透明底色的东西（代码块、行内代码、==高亮==），
+         * 都会把选区盖住：选中代码块里的几行，屏幕上只剩左右两侧 content padding 上的
+         * 两条紫边，正文区域一片白，用户直接反馈「无法选中代码块里的内容」。
+         *
+         * 同时它还装了一份 hideNativeSelection，用 !important 把原生选区刷成透明，
+         * 于是全局那条 `::selection { background: var(--selection) }` 从来没生效过，
+         * 真正画出来的是 CodeMirror 自己的默认色（浅色 #d7d4f0；深色要 .cm-dark 才切到 #233）——
+         * 跟本项目的明暗两套设计令牌完全两套色。
+         *
+         * 原生选区的绘制顺序天生正确（底色 < 选区 < 文字），且直接用 --selection，
+         * 一处改动同时解决「盖住」和「配色不对」。
+         * 代价：多光标/矩形选区的次要选区不再单独画出（它们极少用，主选区仍正常）。
+         */
         history(),
         rectangularSelection(),
         crosshairCursor(),

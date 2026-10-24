@@ -18,6 +18,20 @@ body {
 ::selection {
   background: var(--selection);
 }
+/* 编辑器里的选区要用**设计令牌**里的 --selection。
+ *
+ * 为什么单独写一条（而不是靠上面那条 ::selection 就够）：深色模式装了 oneDark，
+ * 它带一条 `.cm-content ::selection`（特异性 0,1,0）会把 ::selection 顶掉，
+ * 用上它自己的 #3E4451。这里用 .editor-host 提一级特异性，让明暗两套都回到令牌色。
+ *
+ * 这段历史的来龙去脉：以前编辑器装 drawSelection()，它用 !important 把原生选区刷成透明，
+ * 所以上面那条全局规则其实**从未生效**——真正画出来的是 CM 的默认色。现在改回原生选区，
+ * 这条才真正开始起作用（详见 Editor.tsx 里的说明）。
+ */
+.editor-host .cm-content ::selection,
+.editor-host .cm-content::selection {
+  background: var(--selection);
+}
 button {
   font: inherit;
   color: var(--fg);
