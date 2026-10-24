@@ -27,3 +27,4 @@ vite.config.ts.timestamp-*.mjs
 
 # AI 助手的工作记忆（每日日志 + 长期笔记），属于本机状态，不进版本库
 .workbuddy/
+.tmp_test/
