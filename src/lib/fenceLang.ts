@@ -73,7 +73,9 @@ function fenceContext(state: {
   const line = state.doc.lineAt(pos)
   const before = state.doc.sliceString(line.from, pos)
   // 光标前必须是 ``` 开头的一小段（只允许语言标识符字符）
-  const m = /^(`{3,4})([a-zA-Z0-9+#_-]*)$/.exec(before)
+  // \u4e00-\u9fa5：中文别名（`蟒蛇` / `样式` / `数据库`）也要能触发。
+  // 早年只放了 ASCII，导致 LANGS 里那批中文别名是死数据 —— 一个都输不进去。
+  const m = /^(`{3,4})([a-zA-Z0-9+#_\-\u4e00-\u9fa5]*)$/.exec(before)
   if (!m) return null
   // 整行里反引号数量超过已敲的，说明 ``` 后面还有别的内容（如紧跟的行内代码），不提示
   const whole = state.doc.sliceString(line.from, line.to)
@@ -103,29 +105,31 @@ function candidates(typed: string) {
 export function fenceLangCompletion(ctx: CompletionContext): CompletionResult | null {
   const hit = fenceContext(ctx.state)
   if (!hit) return null
+  // ⚠️ 空查询和「已经是完整标识符」都不弹候选 —— 这不是优化，是防往围栏行里塞东西：
+  // 候选框默认选中第一项，而回车在补全激活时执行的是「采纳选中项」而不是换行。
+  // 于是「``` + 回车」会变成「```text」，接着敲的代码全粘到围栏行上，
+  // 整行变成一个巨大的 info string（实测 ` ```js ` + 回车会变成 ` ```jsx `，
+  // 再输入的 `var a = 1` 直接拼进语言标识里，代码块变成空的）。
+  // 语言名一旦写完整就没什么可补的，此时收起候选框，回车才会正常换行。
+  const q = hit.typed.toLowerCase()
+  if (!q) return null
+  if (LANGS.some((l) => [l.id, l.label.toLowerCase(), ...l.alias].some((k) => k === q))) return null
   const options = candidates(hit.typed).map((l) => ({
     label: l.id === l.label.toLowerCase() ? l.label : `${l.label}`,
     // 补全后写入围栏的是 id（标准标识符），展示用 label
     apply: l.id,
     detail: l.id === l.label.toLowerCase() ? undefined : l.id,
-    boost: l.alias.some((a) => a === hit.typed.toLowerCase()) ? 99 : 0,
+    boost: l.alias.some((a) => a === q) ? 99 : 0,
   }))
   if (options.length === 0) {
     // 没有匹配项时给一条提示，明确告诉用户「没匹配到」而不是静默消失
-    return {
-      from: hit.from,
-      to: ctx.pos,
-      options: [{ label: '（无匹配语言）', apply: '' }],
-      validFor: /^[\w+#-]*$/,
-    }
+    return { from: hit.from, to: ctx.pos, options: [{ label: '（无匹配语言）', apply: '' }] }
   }
-  return {
-    from: hit.from,
-    to: ctx.pos,
-    options,
-    // 继续打字时重新过滤，但不弹新的提示框
-    validFor: /^[\w+#-]*$/,
-  }
+  // 不设 validFor：它会让 CM 缓存住上一次的结果，之后只在本地按标签做模糊过滤
+  // —— 上面那条「写完整就收起」的判定就再也跑不到了（实测 ` ```j ` 之后补一个 `s`，
+  // 候选依旧是上一次的列表，回车照样被 `JSX` 截走）。
+  // 代价是每敲一个键重跑一次本源（一次正则 + 一次 ~50 条的循环），可忽略。
+  return { from: hit.from, to: ctx.pos, options }
 }
 
 /** 供文档/帮助界面展示的可选语言清单 */
