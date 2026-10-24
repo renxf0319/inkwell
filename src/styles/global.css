@@ -792,8 +792,10 @@ body.resizing-col * {
   background: color-mix(in srgb, var(--accent-soft) 38%, transparent);
 }
 /* 列悬停：先用 mouseover 在 JS 里标出同一列，形成 Excel/语雀式淡色十字
-   （权重低于上面的 tr:hover，行高亮优先，列色在其余行上显出来） */
-.editor-host .cm-md-table td.is-col-hover {
+   （权重低于上面的 tr:hover，行高亮优先，列色在其余行上显出来）
+   表头格也要参与，否则鼠标停在表格中部时「十字」上方缺一块，「+」所属的列看不出来 */
+.editor-host .cm-md-table td.is-col-hover,
+.editor-host .cm-md-table th.is-col-hover {
   background: color-mix(in srgb, var(--accent-soft) 22%, transparent);
 }
 /* 目标行常亮：鼠标移到行「+」上时 tr:hover 会失效，靠这个类让「+」的归属仍然清楚 */
@@ -850,11 +852,15 @@ body.resizing-col * {
     border-color 0.12s,
     color 0.12s;
 }
-.editor-host .cm-md-table-wrap:hover .cm-md-table-tools-btn {
+.editor-host .cm-md-table-wrap:hover .cm-md-table-tools-btn,
+.editor-host .cm-md-table-wrap:focus-within .cm-md-table-tools-btn {
   opacity: 0.75;
   pointer-events: auto;
 }
-.editor-host .cm-md-table-tools-btn:hover {
+/* 注意优先级：上面的 :hover 组合是 (0,4,0)，这条必须同样具体度才能赢，
+   否则按钮悬停时永远停在 0.75 —— 看起来「按不动」 */
+.editor-host .cm-md-table-wrap:hover .cm-md-table-tools-btn:hover,
+.editor-host .cm-md-table-wrap:focus-within .cm-md-table-tools-btn:hover {
   opacity: 1;
   border-color: var(--border);
   color: var(--accent);

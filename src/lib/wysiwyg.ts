@@ -710,6 +710,8 @@ interface TableData {
   header: string[]
   rows: string[][]
   aligns: (Align | null)[]
+  /** 有就地改动的表格相对行号：0=表头，1=分隔行，2 起=表体行 */
+  dirty?: Set<number>
 }
 
 /** 单元格文本内容（contenteditable 可能在换行处塞 <br>，原样取即可） */
@@ -733,13 +735,114 @@ function readCellText(cell: Element | null): string {
   return cellText(cell?.querySelector(':scope > .cm-md-cell-content') ?? null)
 }
 
-/** 从当前正在渲染的表格 DOM 读回结构化数据（含未落盘的就地编辑） */
+/** 单元格的内容层（落盘只认这一层，见 readCellText 的注释） */
+function cellContentLayer(cell: Element | null): HTMLElement | null {
+  return (cell?.querySelector(':scope > .cm-md-cell-content') as HTMLElement | null) ?? null
+}
+
+/**
+ * 行内渲染器产出的标签 → Markdown 包装符。
+ *
+ * 必须与 INLINE_RULES 的 dom() 一一对应：多了会凭空写出不存在的语法，
+ * 少了就等于「用户在这格改一个字，整格的格式被他自己的编辑冲掉」。
+ */
+const CELL_WRAP: Record<string, [string, string]> = {
+  STRONG: ['**', '**'],
+  EM: ['*', '*'],
+  DEL: ['~~', '~~'],
+  MARK: ['==', '=='],
+  CODE: ['`', '`'],
+}
+
+/** 单元格只能占一行：这些节点一律折成空格，否则换行会把表格行劈开 */
+const CELL_BREAK = new Set(['BR', 'DIV', 'P', 'LI'])
+
+/** DOM → Markdown 行内源码（只用于**确实被改过**的单元格） */
+function serializeInline(node: Node): string {
+  if (node.nodeType === 3) return (node as Text).data
+  if (node.nodeType !== 1) return ''
+  const e = node as HTMLElement
+  const tag = e.nodeName
+  if (CELL_BREAK.has(tag)) return ' '
+  if (tag === 'IMG') {
+    const alt = e.getAttribute('alt') ?? ''
+    const src = e.getAttribute('src') ?? ''
+    return `![${alt}](${src})`
+  }
+  let inner = ''
+  for (const c of Array.from(e.childNodes)) inner += serializeInline(c)
+  if (tag === 'A') {
+    const href = e.getAttribute('href') ?? ''
+    return href ? `[${inner}](${href})` : inner
+  }
+  const pair = CELL_WRAP[tag]
+  return pair && inner ? pair[0] + inner + pair[1] : inner
+}
+
+/** 单元格文本 → 可安全放进表格行的源码：竖线必须转义，否则会把格子劈成两列 */
+function escapeCellText(t: string): string {
+  // `\\?\|` 同时覆盖「裸竖线」和「已经转义过的竖线」，所以是幂等的
+  return t.replace(/\\?\|/g, '\\|')
+}
+
+/**
+ * 单元格当前是否被就地改过。
+ *
+ * 判定依据是渲染时的文本快照（`data-disp`）与现在的文本比对，
+ * **不比较源码**：源码里 `**名称**` 渲染出来只有「名称」两个字，直接比永远不相等。
+ */
+function isCellEdited(cell: Element | null): boolean {
+  if (!cell) return false
+  const disp = cell.getAttribute('data-disp')
+  if (disp === null) return true // 没有快照 → 保守地当作改过，走序列化
+  return readCellText(cell) !== disp
+}
+
+/**
+ * 读出一格该写回源码的文本。
+ *
+ * 两套走法，这是「不丢格式」的关键：
+ *  - **没改过** → 原样返回解析出来的源码（`parseTableRow` 已把 `\|` 解成 `|`，
+ *    所以这里只补转义）。`**粗体**`、`` `代码` ``、`[链接](url)`、甚至用户手写的
+ *    `a\|b`，一个字符都不会动。
+ *  - **改过** → 把 DOM 反序列化回 Markdown，再把竖线转义。
+ *
+ * 上一版两条路合成一条（统一读渲染后的纯文本），后果是**光是点一下表格再点走**，
+ * 整张表的行内格式就被剥成纯文本；含 `\|` 的单元格还会多裂出一列。
+ */
+function cellSourceOf(cell: Element | null): string {
+  if (!cell) return ''
+  const src = cell.getAttribute('data-src')
+  if (src !== null && !isCellEdited(cell)) return escapeCellText(src)
+  const layer = cellContentLayer(cell)
+  if (!layer) return escapeCellText(src ?? '')
+  let text = ''
+  for (const c of Array.from(layer.childNodes)) text += serializeInline(c)
+  // 浏览器在 contenteditable 里习惯把空格写成 &nbsp;，落盘要还原成普通空格；
+  // 制表符同样折成空格（Markdown 表格里的裸 tab 会干扰对齐与部分解析器）
+  const clean = text.replace(/[\u00a0\r\n\t]+/g, ' ').replace(/\s+$/, '')
+  return escapeCellText(clean)
+}
+
+/**
+ * 从当前正在渲染的表格 DOM 读回结构化数据（含未落盘的就地编辑）。
+ *
+ * `dirty` 记录「有就地改动」的**表格相对行号**：0 是表头，1 是分隔行（永不参与），
+ * 2 起是表体行。就地落盘只重写这些行，其余行连空格都不碰。
+ */
 function readTableFromDOM(wrap: HTMLElement, aligns: (Align | null)[]): TableData {
-  const header = Array.from(wrap.querySelectorAll('thead th')).map((th) => readCellText(th))
-  const rows = Array.from(wrap.querySelectorAll('tbody tr')).map((tr) =>
-    Array.from(tr.querySelectorAll('td')).map((td) => readCellText(td))
+  const dirty = new Set<number>()
+  const header = Array.from(wrap.querySelectorAll('thead th')).map((th) => {
+    if (isCellEdited(th)) dirty.add(0)
+    return cellSourceOf(th)
+  })
+  const rows = Array.from(wrap.querySelectorAll('tbody tr')).map((tr, ri) =>
+    Array.from(tr.querySelectorAll('td')).map((td) => {
+      if (isCellEdited(td)) dirty.add(ri + 2)
+      return cellSourceOf(td)
+    })
   )
-  return { header, rows, aligns }
+  return { header, rows, aligns, dirty }
 }
 
 function alignToDelim(a: Align | null): string {
@@ -749,10 +852,14 @@ function alignToDelim(a: Align | null): string {
   return '---'
 }
 
+function buildRowLine(cells: string[]): string {
+  return '| ' + cells.join(' | ') + ' |'
+}
+
 function buildTableLines(d: TableData): string[] {
   const delim = d.aligns.map(alignToDelim).join(' | ')
-  const lines = ['| ' + d.header.join(' | ') + ' |', '| ' + delim + ' |']
-  for (const r of d.rows) lines.push('| ' + r.join(' | ') + ' |')
+  const lines = [buildRowLine(d.header), '| ' + delim + ' |']
+  for (const r of d.rows) lines.push(buildRowLine(r))
   return lines
 }
 
@@ -763,14 +870,53 @@ function replaceTableBlock(view: EditorView, block: TableBlock, lines: string[])
   view.dispatch({ changes: { from, to, insert: lines.join('\n') } })
 }
 
-/** 把就地编辑的结果落盘：仅当 DOM 与源码不一致时才写回，避免无意义重渲染 */
+/**
+ * 把 DOM 里的就地编辑合并进源码行：**只覆盖被改过的行**，其余行原文照抄。
+ *
+ * 「只改这一行」是刻意的：用户的空格对齐、紧凑写法 `|a|b|`、列宽风格都能原样留着，
+ * diff 里也只出现真正改动的那一行。整表重建（buildTableLines）只用于结构变动。
+ */
+function mergeEditedRows(view: EditorView, block: TableBlock, data: TableData): string[] {
+  const lines: string[] = []
+  for (let n = block.startLine; n <= block.endLine; n++) lines.push(view.state.doc.line(n).text)
+  for (const idx of data.dirty ?? []) {
+    if (idx === 0) lines[0] = buildRowLine(data.header)
+    else if (idx >= 2) {
+      const row = data.rows[idx - 2]
+      if (row) lines[idx] = buildRowLine(row)
+    }
+  }
+  return lines
+}
+
+/**
+ * 把就地编辑的结果落盘。
+ *
+ * 没有改动就一个字节都不写 —— 早先「整表重建 + 与源码比对」的写法会在
+ * 用户只是点进表格又点走时，就把 `**粗体**`、`` `代码` ``、`a \| b` 一起改写掉。
+ */
 function commitTableIfChanged(view: EditorView, block: TableBlock, wrap: HTMLElement): void {
   const data = readTableFromDOM(wrap, block.aligns)
-  const lines = buildTableLines(data)
+  if (!data.dirty || data.dirty.size === 0) return
+
+  const next = mergeEditedRows(view, block, data)
   const cur: string[] = []
   for (let n = block.startLine; n <= block.endLine; n++) cur.push(view.state.doc.line(n).text)
-  if (lines.join('\n') === cur.join('\n')) return
-  replaceTableBlock(view, block, lines)
+  if (next.join('\n') === cur.join('\n')) return
+
+  // 焦点还在某一格（Ctrl+S 落盘）：重渲染会把那格换掉，先把光标位置记下来。
+  // 不记的话表现就是「按一下保存，光标凭空消失」，接着打字打到了别处。
+  const active = document.activeElement as HTMLElement | null
+  const activeCell = active?.closest?.('.cm-md-cell') as HTMLElement | null
+  if (activeCell && wrap.contains(activeCell)) {
+    focusCellAfterRender(
+      view,
+      Number(activeCell.dataset.row),
+      Number(activeCell.dataset.col),
+      { offset: caretOffsetInCell(activeCell), anchor: block.startLine }
+    )
+  }
+  replaceTableBlock(view, block, next)
 }
 
 /**
@@ -779,17 +925,100 @@ function commitTableIfChanged(view: EditorView, block: TableBlock, wrap: HTMLEle
  * ⚠️ 必须在 `view.dispatch` **之前**调用：CodeMirror 的 updateListener 是在
  * dispatch 内部同步触发的。早期把它写在 dispatch 之后，监听器早已跑完，
  * pendingRefocus 只能等下一次文档变化才被消费 —— 表现为增删行列后光标凭空消失。
+ *
+ * anchor 是**表格锚点**（表格起始行号）：文档里可能有多张表，只按 (row, col)
+ * 找会跳进另一张表里。offset 是格内字符偏移，-1 表示放到末尾。
  */
-function focusCellAfterRender(_view: EditorView, row: number, col: number): void {
-  pendingRefocus = { row, col }
+function focusCellAfterRender(
+  _view: EditorView,
+  row: number,
+  col: number,
+  opts: { offset?: number; anchor?: number } = {}
+): void {
+  pendingRefocus = { row, col, offset: opts.offset ?? -1, anchor: opts.anchor ?? -1 }
 }
 
-function copyTable(view: EditorView, block: TableBlock): void {
-  const from = view.state.doc.line(block.startLine).from
-  const to = view.state.doc.line(block.endLine).to
-  const text = view.state.doc.sliceString(from, to)
+/** 光标在当前单元格内的字符偏移；不在格内返回 -1 */
+function caretOffsetInCell(cell: HTMLElement): number {
+  const layer = cellContentLayer(cell)
+  const sel = window.getSelection()
+  if (!layer || !sel || sel.rangeCount === 0) return -1
+  const range = sel.getRangeAt(0)
+  if (!layer.contains(range.startContainer)) return -1
+  const pre = document.createRange()
+  pre.selectNodeContents(layer)
+  pre.setEnd(range.startContainer, range.startOffset)
+  return pre.toString().length
+}
+
+/** 聚焦单元格并按字符偏移落点（offset < 0 → 末尾） */
+function focusCellNode(node: HTMLElement, offset = -1): void {
+  node.focus()
+  const sel = window.getSelection()
+  if (!sel) return
+  const target = cellContentLayer(node) ?? node
+  const range = document.createRange()
+  let rest = offset
+  let placed = false
+  if (rest >= 0) {
+    // 按文本节点逐段减去，落在 offset 对应的那一格位置
+    const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT)
+    let n: Node | null = walker.nextNode()
+    while (n) {
+      const len = (n as Text).data.length
+      if (rest <= len) {
+        range.setStart(n, rest)
+        range.collapse(true)
+        placed = true
+        break
+      }
+      rest -= len
+      n = walker.nextNode()
+    }
+  }
+  if (!placed) {
+    range.selectNodeContents(target)
+    range.collapse(false)
+  }
+  sel.removeAllRanges()
+  sel.addRange(range)
+}
+
+/** 写剪贴板：优先异步 API，没有就退回 execCommand（Tauri 自定义协议下常拿不到 clipboard） */
+function writeClipboard(text: string): void {
   const clip = navigator.clipboard
-  if (clip) clip.writeText(text).catch(() => {})
+  if (clip?.writeText) {
+    clip.writeText(text).catch(() => legacyCopy(text))
+    return
+  }
+  legacyCopy(text)
+}
+
+function legacyCopy(text: string): void {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.setAttribute('readonly', '')
+  // 不能用 display:none：那不参与选区，选中就是空的
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+  } catch {
+    // 无剪贴板权限时静默失败：不打断用户，也不抛未捕获异常
+  }
+  ta.remove()
+}
+
+/**
+ * 复制表格源码。
+ *
+ * ⚠️ 必须从 **DOM** 读，不能直接取 `view.state.doc`：单元格里刚敲的内容还没落盘
+ * （要等离开表格才提交），取源码会复制到「编辑之前」的旧内容。
+ */
+function copyTable(view: EditorView, block: TableBlock, wrap: HTMLElement): void {
+  const data = readTableFromDOM(wrap, block.aligns)
+  writeClipboard(mergeEditedRows(view, block, data).join('\n'))
 }
 
 function deleteTable(view: EditorView, block: TableBlock): void {
@@ -807,19 +1036,6 @@ function cellNode(wrap: HTMLElement, row: number, col: number): HTMLElement | nu
   return wrap.querySelector<HTMLElement>(`.cm-md-cell[data-row="${row}"][data-col="${col}"]`)
 }
 
-/** 聚焦单元格，并把光标放到内容末尾（atEnd=false 时放到开头） */
-function focusCellNode(node: HTMLElement, atEnd = true): void {
-  node.focus()
-  const sel = window.getSelection()
-  if (!sel) return
-  const target = node.querySelector('.cm-md-cell-content') ?? node
-  const range = document.createRange()
-  range.selectNodeContents(target)
-  range.collapse(!atEnd)
-  sel.removeAllRanges()
-  sel.addRange(range)
-}
-
 /** 在列索引 at 处（0..列数）插入一列；focusRow 决定插入后光标回到哪一行 */
 function insertColumnAt(
   view: EditorView,
@@ -833,7 +1049,7 @@ function insertColumnAt(
   data.header.splice(idx, 0, '')
   for (const r of data.rows) r.splice(idx, 0, '')
   data.aligns.splice(idx, 0, null)
-  focusCellAfterRender(view, Math.min(Math.max(focusRow, 0), data.rows.length), idx)
+  focusCellAfterRender(view, Math.min(Math.max(focusRow, 0), data.rows.length), idx, { anchor: block.startLine })
   replaceTableBlock(view, block, buildTableLines(data))
 }
 
@@ -851,7 +1067,9 @@ function insertRowAt(
   const data = readTableFromDOM(wrap, block.aligns)
   const idx = Math.min(Math.max(at, 0), data.rows.length)
   data.rows.splice(idx, 0, Array.from({ length: data.header.length }, () => ''))
-  focusCellAfterRender(view, idx + 1, Math.min(Math.max(focusCol, 0), data.header.length - 1))
+  focusCellAfterRender(view, idx + 1, Math.min(Math.max(focusCol, 0), data.header.length - 1), {
+    anchor: block.startLine,
+  })
   replaceTableBlock(view, block, buildTableLines(data))
 }
 
@@ -869,7 +1087,7 @@ function deleteRowAt(
   // 删完还有行就停在原位置（原来那行的下一行顶上来）；全删光就回到表头
   const next = Math.min(ri, data.rows.length - 1)
   const col = Math.min(Math.max(focusCol, 0), data.header.length - 1)
-  focusCellAfterRender(view, next >= 0 ? next + 1 : 0, col)
+  focusCellAfterRender(view, next >= 0 ? next + 1 : 0, col, { anchor: block.startLine })
   replaceTableBlock(view, block, buildTableLines(data))
 }
 
@@ -887,7 +1105,9 @@ function deleteColumnAt(
   for (const r of data.rows) r.splice(ci, 1)
   data.aligns.splice(ci, 1)
   const col = Math.min(Math.max(ci - 1, 0), data.header.length - 1)
-  focusCellAfterRender(view, Math.min(Math.max(focusRow, 0), data.rows.length), col)
+  focusCellAfterRender(view, Math.min(Math.max(focusRow, 0), data.rows.length), col, {
+    anchor: block.startLine,
+  })
   replaceTableBlock(view, block, buildTableLines(data))
 }
 
@@ -903,8 +1123,36 @@ function setColumnAlign(
   const data = readTableFromDOM(wrap, block.aligns)
   if (ci < 0 || ci >= data.header.length) return
   data.aligns[ci] = align
-  focusCellAfterRender(view, Math.min(Math.max(focusRow, 0), data.rows.length), ci)
+  focusCellAfterRender(view, Math.min(Math.max(focusRow, 0), data.rows.length), ci, {
+    anchor: block.startLine,
+  })
   replaceTableBlock(view, block, buildTableLines(data))
+}
+
+/**
+ * 单元格粘贴。
+ *
+ * 只接受纯文本：从网页/Word 粘进来的 HTML 会带上 `&nbsp;`、`<div>`、行内样式，
+ * 反序列化回 Markdown 的结果既不可控也没意义，还会把单元格撑成多行。
+ * 换行同样要折成空格 —— 表格行必须是一行，否则整个表格结构会被劈开。
+ */
+function onCellPaste(e: ClipboardEvent): void {
+  e.preventDefault()
+  e.stopPropagation()
+  const raw = e.clipboardData?.getData('text/plain') ?? ''
+  if (!raw) return
+  // 空白一律归一：换行会让表格行劈开，制表符/&nbsp; 写进源码既不可见又难维护
+  const clean = raw.replace(/[ \t\u00a0\r\n]+/g, ' ').replace(/^ | $/g, '')
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return
+  const range = sel.getRangeAt(0)
+  range.deleteContents()
+  const node = document.createTextNode(clean)
+  range.insertNode(node)
+  range.setStartAfter(node)
+  range.collapse(true)
+  sel.removeAllRanges()
+  sel.addRange(range)
 }
 
 /**
@@ -916,6 +1164,10 @@ function setColumnAlign(
  * 其余按键只做 stopPropagation，避免穿透到 CodeMirror 触发整块重渲染。
  */
 function onCellKey(e: KeyboardEvent, view: EditorView, block: TableBlock, wrap: HTMLElement): void {
+  // 中文输入法组字期间（isComposing）不能抢键：Tab/Enter 可能正被输入法用来选词，
+  // 抢掉会表现为「打拼音时莫名跳格 / 多出一行」
+  if (e.isComposing) return
+
   if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey)) {
     // 先落盘，再让全局保存快捷键继续生效
     commitTableIfChanged(view, block, wrap)
@@ -962,6 +1214,16 @@ function onCellKey(e: KeyboardEvent, view: EditorView, block: TableBlock, wrap: 
     return
   }
 
+  // Esc：落盘并退出单元格。没有这个键，焦点进了表格就只能靠「点到别处」离开，
+  // 用键盘的人是卡住的（Tab 只会在格子之间循环，最后一格还会加行）
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    e.stopPropagation()
+    commitTableIfChanged(view, block, wrap)
+    ;(e.target as HTMLElement).blur()
+    return
+  }
+
   const stop = new Set([
     'Backspace',
     'Delete',
@@ -996,6 +1258,8 @@ class TableWidget extends WidgetType {
   }
   toDOM(view: EditorView): HTMLElement {
     const wrap = el('div', 'cm-md-table-wrap')
+    // 锚点：结构变动后回填光标时用来认出「是这张表」（见 tableRefocus）
+    wrap.dataset.tableStart = String(this.block.startLine)
 
     // ---- 行列操作的「目标单元格」：光标优先，悬停兜底 ----
     //
@@ -1115,7 +1379,7 @@ class TableWidget extends WidgetType {
       run: () => setColumnAlign(view, this.block, wrap, target().col, 'right', target().row),
     })
     addDivider()
-    addItem({ label: '复制表格', run: () => copyTable(view, this.block) })
+    addItem({ label: '复制表格', run: () => copyTable(view, this.block, wrap) })
     addItem({ label: '删除表格', danger: true, run: () => deleteTable(view, this.block) })
 
     const openMenu = (): void => {
@@ -1318,12 +1582,16 @@ class TableWidget extends WidgetType {
     td.dataset.col = String(col)
     td.setAttribute('contenteditable', 'true')
     td.className = 'cm-md-cell'
+    // 源码原文 + 渲染文本快照，落盘时靠这两个值区分「没碰过」和「改过」（见 cellSourceOf）
+    td.dataset.src = c.text
     // 内容必须包一层 .cm-md-cell-content：落盘读取（readCellText）只认这一层。
     // 「+」按钮作为兄弟节点挂在内容层外面，永远不会被当成单元格文本写回源码。
     const content = el('span', 'cm-md-cell-content')
     content.appendChild(renderInlineDOM(c.text))
+    td.dataset.disp = cellText(content)
     td.appendChild(content)
     td.addEventListener('keydown', (e) => onCellKey(e, view, this.block, wrap))
+    td.addEventListener('paste', (e) => onCellPaste(e))
     return td
   }
   ignoreEvent(): boolean {
@@ -1352,7 +1620,7 @@ class TableWidget extends WidgetType {
  */
 let markIndex: [number, number][] = []
 /** 结构变动（增删行列）后，等表格重渲染把光标送回目标单元格 */
-let pendingRefocus: { row: number; col: number } | null = null
+let pendingRefocus: { row: number; col: number; offset: number; anchor: number } | null = null
 
 /** 焦点是否落在表格控件内部（contenteditable 单元格 / + 按钮 / 工具栏） */
 function isInsideTableWidget(el: Element | null): boolean {
@@ -1537,22 +1805,21 @@ const tableRefocus = EditorView.updateListener.of((u) => {
   pendingRefocus = null
   const view = u.view
   requestAnimationFrame(() => {
-    const wraps = view.dom.querySelectorAll('.cm-md-table-wrap')
-    for (const w of Array.from(wraps) as HTMLElement[]) {
+    // 先按锚点锁定「是哪一张表」：文档里两张表坐标完全可能一样，
+    // 只按 data-row/col 找会把光标送到另一张表里（用错表比丢光标更糟）
+    let wraps = Array.from(view.dom.querySelectorAll('.cm-md-table-wrap')) as HTMLElement[]
+    if (target.anchor >= 0) {
+      const same = wraps.filter((w) => w.dataset.tableStart === String(target.anchor))
+      if (same.length > 0) wraps = same
+    }
+    for (const w of wraps) {
       const cell = w.querySelector(`[data-row="${target.row}"][data-col="${target.col}"]`)
-      if (cell) {
-        const node = cell as HTMLElement
-        node.focus()
-        const sel = window.getSelection()
-        if (sel) {
-          const range = document.createRange()
-          range.selectNodeContents(node)
-          range.collapse(false)
-          sel.removeAllRanges()
-          sel.addRange(range)
-        }
-        break
-      }
+      if (!cell) continue
+      // 必须落到 `.cm-md-cell-content` 里：表头单元格的「+」按钮是内容的**兄弟节点**，
+      // 直接 selectNodeContents(th) + collapse(false) 会把光标停在按钮后面，
+      // 接着输入的字符就落在内容层之外，落盘时读不到 —— 表现为「输入的字消失」。
+      focusCellNode(cell as HTMLElement, target.offset)
+      break
     }
   })
 })
