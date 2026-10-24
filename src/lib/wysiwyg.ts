@@ -1007,12 +1007,6 @@ class TableWidget extends WidgetType {
     let hover: { row: number; col: number } | null = null
     const target = (): { row: number; col: number } => caret ?? hover ?? { row: 0, col: 0 }
 
-    /** 整列淡色定位：跟随光标；没有光标时才跟随悬停 */
-    const paintColumn = (col: number | null): void => {
-      for (const c of Array.from(wrap.querySelectorAll<HTMLElement>('.cm-md-cell'))) {
-        c.classList.toggle('is-col-hover', col !== null && Number(c.dataset.col) === col)
-      }
-    }
     const cellOf = (t: EventTarget | null): HTMLElement | null => {
       const e = t as Element | null
       const cell = e?.closest?.('.cm-md-cell') as HTMLElement | null
@@ -1147,14 +1141,45 @@ class TableWidget extends WidgetType {
     wrap.appendChild(tools)
 
     // ---- 表格本体 ----
-    // 横向滚动只包住表格，菜单/按钮留在 wrap 上，才不会被滚动容器裁掉
+    // 横向滚动只包住表格，控件留在 wrap 上，才不会被滚动容器裁掉
     const scroller = el('div', 'cm-md-table-scroll')
     const table = el('table', 'cm-md-table')
+
+    // 每列一个「+」，挂在表头单元格右缘。悬停/光标落到哪一列，只有那一列的「+」显形，
+    // 所以既能「任意位置插入」，又不会退回成一排 +++。
+    const colAdds: HTMLButtonElement[] = []
+    const lastCol = this.block.header.cells.length - 1
+    const makeColAdd = (col: number): HTMLButtonElement => {
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.className = 'cm-md-col-add' + (col === lastCol ? ' is-last' : '')
+      b.dataset.col = String(col)
+      b.textContent = '+'
+      b.title = '在右侧插入一列（Shift+点击：插入到左侧）'
+      b.setAttribute('aria-label', '在右侧插入一列')
+      // 按钮在 contenteditable 单元格内，必须脱离可编辑文本模型，
+      // 否则全选删除时可能被当成文本一并删掉
+      b.contentEditable = 'false'
+      b.addEventListener('mousedown', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+      })
+      b.addEventListener('click', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        // 默认插到右侧，Shift 插到左侧
+        insertColumnAt(view, this.block, wrap, e.shiftKey ? col : col + 1, target().row)
+      })
+      colAdds.push(b)
+      return b
+    }
 
     const thead = document.createElement('thead')
     const htr = document.createElement('tr')
     this.block.header.cells.forEach((c, i) => {
-      htr.appendChild(this.cellEl('th', c, i, 0, view, wrap))
+      const th = this.cellEl('th', c, i, 0, view, wrap)
+      th.appendChild(makeColAdd(i))
+      htr.appendChild(th)
     })
     thead.appendChild(htr)
     table.appendChild(thead)
@@ -1171,30 +1196,14 @@ class TableWidget extends WidgetType {
     scroller.appendChild(table)
     wrap.appendChild(scroller)
 
-    // ---- 列「+」：右侧留白里，竖排在工具栏下方 ----
-    const colAdd = document.createElement('button')
-    colAdd.type = 'button'
-    colAdd.className = 'cm-md-col-add'
-    colAdd.textContent = '+'
-    colAdd.title = '在右侧插入一列'
-    colAdd.setAttribute('aria-label', '在右侧插入一列')
-    colAdd.addEventListener('mousedown', (e) => {
-      e.preventDefault()
-      e.stopPropagation()
-    })
-    colAdd.addEventListener('click', (e) => {
-      e.preventDefault()
-      e.stopPropagation()
-      insertColumnAt(view, this.block, wrap, this.block.header.cells.length, target().row)
-    })
-    wrap.appendChild(colAdd)
-
-    // ---- 行「+」：底部留白里，与表格左缘对齐 ----
+    // ---- 行「+」：右侧留白里的单个按钮，靠改 top 对齐到当前行 ----
+    // 点击插到该行下方（Shift：上方），覆盖「任意位置插行」
+    let rowAddRow = -1 // 这个「+」当前对齐的行；点击以它为准（所见即所点）
     const rowAdd = document.createElement('button')
     rowAdd.type = 'button'
     rowAdd.className = 'cm-md-row-add'
     rowAdd.textContent = '+'
-    rowAdd.title = '在下方插入一行'
+    rowAdd.title = '在下方插入一行（Shift+点击：插入到上方）'
     rowAdd.setAttribute('aria-label', '在下方插入一行')
     rowAdd.addEventListener('mousedown', (e) => {
       e.preventDefault()
@@ -1203,27 +1212,79 @@ class TableWidget extends WidgetType {
     rowAdd.addEventListener('click', (e) => {
       e.preventDefault()
       e.stopPropagation()
-      insertRowAt(view, this.block, wrap, this.block.rows.length, target().col)
+      const row = rowAddRow
+      if (row < 1) {
+        // 表体为空时「+」常显在表头中线（is-empty），此时没有行号可用：
+        // 兜底插到表头下方第一行，否则会出现「看得见、点不动」
+        if (this.block.rows.length === 0) insertRowAt(view, this.block, wrap, 0, target().col)
+        return
+      }
+      insertRowAt(view, this.block, wrap, e.shiftKey ? row - 1 : row, target().col)
     })
+    // 表体被删空时没有行可悬停，把「+」固定显示在表头中线，保证还能加回第一行
+    if (tbody.children.length === 0) rowAdd.classList.add('is-empty')
     wrap.appendChild(rowAdd)
 
-    // ---- 光标 / 悬停：分别记录，操作目标由 target() 统一裁决 ----
+    // ---- 当前行列：列高亮 + 列「+」显隐 + 行「+」跟随 ----
+    //
+    // 「+」是直接操作（鼠标指到哪一列/哪一行就插在哪），所以展示位置**悬停优先**：
+    // 所见即所点，不会有「看到的是 A 列、插进去是 B 列」的歧义。
+    // 菜单不同 —— 菜单不带位置信息，必须跟光标（target()），这是上一轮修过的坑。
+    let shownRow = -1
+    let shownCol = -1
+    let shownTr: HTMLElement | null = null
+    const syncActive = (pos: { row: number; col: number } | null): void => {
+      const row = pos ? pos.row : -1
+      const col = pos ? pos.col : -1
+      if (row === shownRow && col === shownCol) return
+      shownRow = row
+      shownCol = col
+      for (const c of Array.from(wrap.querySelectorAll<HTMLElement>('.cm-md-cell'))) {
+        c.classList.toggle('is-col-hover', col >= 0 && Number(c.dataset.col) === col)
+      }
+      for (const b of colAdds) {
+        b.classList.toggle('is-active', col >= 0 && Number(b.dataset.col) === col)
+      }
+      // 目标行常亮：鼠标从行移到「+」上时 tr:hover 会失效，
+      // 没有这个类就看不出「+」属于哪一行了
+      if (shownTr) shownTr.classList.remove('is-row-hover')
+      const tr = row >= 1 ? (tbody.children[row - 1] as HTMLElement | undefined) : undefined
+      shownTr = tr ?? null
+      if (tr) {
+        tr.classList.add('is-row-hover')
+        rowAddRow = row
+        const wrapBox = wrap.getBoundingClientRect()
+        const rowBox = tr.getBoundingClientRect()
+        // 按钮高 20px（见 global.css），让按钮中心对准行中线
+        rowAdd.style.top = `${rowBox.top - wrapBox.top + rowBox.height / 2 - 10}px`
+        rowAdd.classList.add('is-active')
+      } else {
+        rowAddRow = -1
+        rowAdd.classList.remove('is-active')
+      }
+    }
+    const displayPos = (): { row: number; col: number } | null => hover ?? caret
+
+    // ---- 光标 / 悬停：分开记录 ----
     wrap.addEventListener('mouseover', (e) => {
       const cell = cellOf(e.target)
       if (!cell) return
       hover = { row: Number(cell.dataset.row), col: Number(cell.dataset.col) }
-      // 有光标时，列高亮跟着光标走 —— 否则「高亮的列」和「操作的列」会不是同一列
-      if (!caret) paintColumn(hover.col)
+      syncActive(displayPos())
     })
     wrap.addEventListener('mouseleave', () => {
+      // 鼠标离开表格就收起控件：避免「点过一格的 + 一直挂在那儿」的视觉噪音。
+      // 键盘导航（Tab/Enter）不经过鼠标，focusin 会重新显示，不影响可达性。
       hover = null
-      if (!caret) paintColumn(null)
+      syncActive(null)
     })
     wrap.addEventListener('focusin', (e) => {
       const cell = cellOf(e.target)
       if (!cell) return
       caret = { row: Number(cell.dataset.row), col: Number(cell.dataset.col) }
-      paintColumn(caret.col)
+      // 清掉悬停：键盘 Tab 切格时鼠标可能停在上一个格，不能让它抢走展示位置
+      hover = null
+      syncActive(displayPos())
     })
 
     // 点击表格其它区域时收起菜单
@@ -1231,12 +1292,12 @@ class TableWidget extends WidgetType {
       if (!tools.contains(e.target as Node)) closeMenu()
     })
 
-    // 焦点离开时：① 清掉光标（列高亮交回悬停）；② 把未提交的单元格改动落盘
+    // 焦点离开时：① 控件交回悬停（或全部收起）；② 把未提交的单元格改动落盘
     wrap.addEventListener('focusout', (e: FocusEvent) => {
       const related = e.relatedTarget as Node | null
       if (related && wrap.contains(related)) return // 仍在同一表内（切到另一格 / 点按钮），不提交
       caret = null
-      paintColumn(hover ? hover.col : null)
+      syncActive(displayPos())
       commitTableIfChanged(view, this.block, wrap)
     })
 

@@ -697,7 +697,7 @@ body.resizing-col * {
    * 右侧 26px / 底部 22px 是给控件留的位置（列「+」、行「+」），
    * 控件绝对定位在 padding 里，永远不会压住单元格内容。 */
   margin: 0;
-  padding: 0.5em 26px 22px 0;
+  padding: 0.5em 26px 0.5em 0;
   position: relative;
   /* 菜单要能溢出表格，所以这里不能裁剪；横向滚动交给 .cm-md-table-scroll */
   overflow: visible;
@@ -740,6 +740,8 @@ body.resizing-col * {
 }
 .editor-host .cm-md-table th,
 .editor-host .cm-md-table td {
+  /* 列「+」绝对定位的包含块：必须贴在单元格右缘（列分隔线）上 */
+  position: relative;
   border: none;
   border-bottom: 1px solid var(--border);
   /* 竖向分隔线比横线更淡：视觉上先分行、再分列，语雀就是这个层次 */
@@ -793,6 +795,10 @@ body.resizing-col * {
    （权重低于上面的 tr:hover，行高亮优先，列色在其余行上显出来） */
 .editor-host .cm-md-table td.is-col-hover {
   background: color-mix(in srgb, var(--accent-soft) 22%, transparent);
+}
+/* 目标行常亮：鼠标移到行「+」上时 tr:hover 会失效，靠这个类让「+」的归属仍然清楚 */
+.editor-host .cm-md-table tbody tr.is-row-hover td {
+  background: color-mix(in srgb, var(--accent-soft) 38%, transparent);
 }
 /* 单元格内的行内标记：沿用全局样式，但去掉行内代码的行内 padding 会显得挤 */
 .editor-host .cm-md-table .cm-md-code {
@@ -907,7 +913,7 @@ body.resizing-col * {
   color: var(--danger);
 }
 
-/* 列「+」/ 行「+」：只在表格悬停时出现，各最多一个 */
+/* 列「+」/ 行「+」：同一时刻各只出现一个，跟随悬停/光标所在的行列 */
 .editor-host .cm-md-col-add,
 .editor-host .cm-md-row-add {
   position: absolute;
@@ -926,15 +932,15 @@ body.resizing-col * {
   opacity: 0;
   pointer-events: none;
   cursor: pointer;
-  z-index: 5;
+  z-index: 6;
   transition:
     opacity 0.12s,
     border-color 0.12s,
     color 0.12s,
     background 0.12s;
 }
-.editor-host .cm-md-table-wrap:hover .cm-md-col-add,
-.editor-host .cm-md-table-wrap:hover .cm-md-row-add {
+.editor-host .cm-md-col-add.is-active,
+.editor-host .cm-md-row-add.is-active {
   opacity: 1;
   pointer-events: auto;
 }
@@ -944,19 +950,26 @@ body.resizing-col * {
   color: var(--accent);
   background: var(--accent-soft);
 }
-/* 列「+」竖排在右侧留白，避开顶部菜单按钮，垂直居中于表格高度
-   （bottom 取 6px 而非对齐表格底边：只有表头的极短表格里也不会被挤出去） */
+/* 列「+」骑在列分隔线上（right:-10px 使 20px 按钮正好以边框为中线） */
 .editor-host .cm-md-col-add {
-  right: 3px;
-  top: 30px;
-  bottom: 6px;
-  height: 20px;
-  margin-block: auto;
+  right: -10px;
+  top: 50%;
+  transform: translateY(-50%);
 }
-/* 行「+」在底部留白，与表格左缘对齐 */
+/* 最后一列没有「右侧分隔线」可用：收进单元格内侧，避开右上角「⋯」菜单 */
+.editor-host .cm-md-col-add.is-last {
+  right: 2px;
+}
+/* 行「+」在右侧留白里，top 由 JS 按目标行的中线设置 */
 .editor-host .cm-md-row-add {
-  left: 0;
-  bottom: 1px;
+  right: 3px;
+}
+/* 表体被删空时没有行可悬停：固定在表头中线常显，保证还能加回第一行 */
+.editor-host .cm-md-row-add.is-empty {
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 1;
+  pointer-events: auto;
 }
 
 /* --- 源码回落态：光标进入表格后，逐行显示原始竖线 --- */
