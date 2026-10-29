@@ -61,6 +61,13 @@ jobs:
           rm -f package-lock.json
           npm install --no-audit --no-fund
 
+      # 版本漂移自检：Tauri 会拒绝构建 NPM 包与 Rust crate 版本不同步的组合。
+      # 因为上面刚删掉 lock 全新安装，这里校验的就是「这次真正会拿去构建的版本」。
+      # 单独成一步，是为了让失败原因直接出现在日志里，而不是埋在 tauri build 输出中间。
+      - name: Check Tauri package versions
+        shell: bash
+        run: npm run check:tauri
+
       # 应用内更新需要签名私钥。但「没配密钥」不该让整个发版挂掉 ——
       # createUpdaterArtifacts 在缺少密钥时会让 Tauri 直接构建失败，
       # 所以检测不到就把它去掉：代价只是这次不发更新清单，安装包照常产出。

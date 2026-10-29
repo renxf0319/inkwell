@@ -15,6 +15,7 @@
     "build:desktop": "tauri build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "check:tauri": "node scripts/check-tauri-versions.mjs",
     "tauri": "tauri"
   },
   "engines": {
@@ -30,11 +31,11 @@
     "@codemirror/state": "^6.4.1",
     "@codemirror/theme-one-dark": "^6.1.2",
     "@codemirror/view": "^6.34.1",
-    "@tauri-apps/api": "^2.0.1",
-    "@tauri-apps/plugin-dialog": "^2.0.1",
-    "@tauri-apps/plugin-opener": "^2.7.0",
-    "@tauri-apps/plugin-process": "^2.4.0",
-    "@tauri-apps/plugin-updater": "^2.13.2",
+    "@tauri-apps/api": "2.12.4",
+    "@tauri-apps/plugin-dialog": "2.8.4",
+    "@tauri-apps/plugin-opener": "2.7.2",
+    "@tauri-apps/plugin-process": "2.4.0",
+    "@tauri-apps/plugin-updater": "2.13.3",
     "codemirror": "^6.0.1",
     "dompurify": "^3.1.7",
     "highlight.js": "^11.10.0",
@@ -48,7 +49,7 @@
     "zustand": "^4.5.5"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.1",
+    "@tauri-apps/cli": "2.12.4",
     "@types/dompurify": "^3.0.5",
     "@types/markdown-it": "^14.1.2",
     "@types/react": "^18.3.10",
