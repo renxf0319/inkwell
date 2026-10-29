@@ -16,7 +16,7 @@ Kore 的目标是成为最好用的本地 Markdown 写作工具：启动快、�
 
 | 平台 | 文件 | 说明 |
 | --- | --- | --- |
-| **Windows** | `Kore_*_x64-setup.exe` / `Kore_*_x64_en-US.msi` | `.exe` 双击安装，或 `.msi` 用于企业部署 |
+| **Windows** | `Kore_*_x64-setup.exe` | `.exe` 双击安装（NSIS）。Windows 只出这一种包，原因见设计文档 §5.10.1 |
 | **macOS** | `Kore_*_aarch64.dmg` | Apple Silicon（M 系列）；打开后拖入「应用程序」 |
 | **Linux** | `Kore_*_amd64.AppImage` / `.deb` / `.rpm` | AppImage 免安装直接运行；`.deb`/`.rpm` 供 Debian/RedHat 系包管理 |
 

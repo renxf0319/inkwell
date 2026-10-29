@@ -3,8 +3,8 @@ name: Release
 # 推送 v* 标签（如 v0.3.1）即自动构建安装包并附到 GitHub Release。
 # 也可在 Actions 页面手动 Run workflow 触发。
 #
-# 开发阶段当前**只构建 Windows**（出 .exe 与 .msi），这样单次构建从
-# 三平台并行变成一个 runner，几十秒就能拿到包，方便反复验证。
+# 开发阶段当前**只构建 Windows**（只出 .exe，NSIS；原因见设计文档 §5.10.1），
+# 这样单次构建从三平台并行变成一个 runner，几分钟就能拿到包，方便反复验证。
 # 等功能稳定要对外发版时，把下面注释掉的 macos / ubuntu 两行恢复即可。
 on:
   push:
@@ -97,7 +97,7 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: 'Kore v__VERSION__'
-          releaseBody: 'Windows 安装包（.exe 双击安装 / .msi 供企业部署）。下载后安装即可使用，无云同步。'
+          releaseBody: 'Windows 安装包（.exe，双击安装）。装好后可在应用内「检查更新」自动升级，无云同步。'
           # 直接发布（不建草稿），方便直接点下载链接取包
           releaseDraft: false
           # ⚠️ 必须为 false（正式版），不能是 true（预发布）。
