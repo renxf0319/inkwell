@@ -1,6 +1,6 @@
 [package]
 name = "kore"
-version = "0.3.13"
+version = "0.3.14"
 description = "Kore 极速本地 Markdown 编辑器"
 authors = ["Kore Contributors"]
 edition = "2021"
