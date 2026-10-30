@@ -18,7 +18,7 @@ import { markdown } from '@codemirror/lang-markdown'
 import { javascript } from '@codemirror/lang-javascript'
 import { syntaxHighlighting, defaultHighlightStyle, HighlightStyle } from '@codemirror/language'
 import { oneDark } from '@codemirror/theme-one-dark'
-import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
+import { search, searchKeymap } from '@codemirror/search'
 import { tags } from '@lezer/highlight'
 import {
   autocompletion,
@@ -28,6 +28,7 @@ import {
 } from '@codemirror/autocomplete'
 import { useStore } from '../state/store'
 import { livePreview, lineToPos } from '../lib/wysiwyg'
+import { orderedListRenumber } from '../lib/listNumbering'
 import { fenceLangCompletion } from '../lib/fenceLang'
 import { slashCompletion } from '../lib/slash'
 import { isMarkdownFile, isCodeFile } from '../lib/filetype'
@@ -126,9 +127,17 @@ export default function Editor() {
         history(),
         rectangularSelection(),
         crosshairCursor(),
-        highlightSelectionMatches(),
+        /*
+         * 只装 `search()`（Ctrl+F 面板 + 搜索命中高亮），**故意不装**
+         * `highlightSelectionMatches()`：后者会把「当前选中的词」在全文的
+         * 每一处都高亮，用户拖选一段话时会看到页面上散布一堆高亮块，
+         * 误以为自己选中了多块内容。搜索高亮仍由 Ctrl+F 触发，行为不变。
+         */
+        search(),
         // Markdown 解析 / WYSIWYG 装饰，或纯文本模式（二选一）
         asMarkdown,
+        // 删掉有序列表中的一行后，把后面同缩进列表项的序号接上
+        ...(mdMode ? [orderedListRenumber()] : []),
         syntaxHighlighting(koreHighlightStyle, { fallback: true }),
         // 输入 ``` 后提示语言标识符（认不全也能选）
         closeBrackets(),
