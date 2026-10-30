@@ -356,7 +356,16 @@ function processLine(
   }
 
   // --- 分割线 ---
+  //
+  // ⚠️ 光标在本行时**保留原文**（与围栏行 renderFenceLine 同一策略）。
+  //
+  // 原因：整行被 replace 隐藏后，`.cm-md-hr` 的高度来自 `padding-top: 1.5em`，
+  // 而隐藏文本里的光标落在 content box —— 视觉上正好在横线**下方**。
+  // 用户以为自己在"下一行"，直接打字就被并进 `---`，变成 `---测试`。
+  // 让本行露原文，用户能清楚看到光标还在 `---` 这一行；按 Enter 离开后
+  // 才渲染成分隔线（Typora 也是"这一行写完离开后才成块"）。
   if (HR_RE.test(lineText)) {
+    if (ctx.cursorLine === lineNo) return
     addLine(ctx, lineFrom, 'cm-md-hr')
     hide(ctx, lineFrom, lineFrom + lineText.length)
     return
