@@ -138,8 +138,9 @@ function TreeNode({
 // 白名单外的条目（.class / .png / .jar）根本不列出来：让用户点到再告诉他
 // 「不支持」，不如不让他点。（原先有个「显示全部文件」的眼睛开关，已按需求去掉。）
 //
-// 右键菜单：新建文件（默认 .md）/ 新建文件夹 / 打开文件位置 / 删除。
-// 新建与删除都**直接落盘**，不是只改内存 —— 见 store 的 createEntry / deleteEntry。
+// 右键菜单：新建文件（默认 .md）/ 新建文件夹 / 重命名 / 打开文件位置 / 删除。
+// 新建、重命名与删除都**直接落盘**，不是只改内存 —— 见 store 的
+// createEntry / renameEntry / deleteEntry。
 export function FileTree() {
   const rootPath = useStore((s) => s.rootPath)
   const rootName = useStore((s) => s.rootName)
@@ -149,13 +150,14 @@ export function FileTree() {
   const openFolder = useStore((s) => s.openFolder)
   const createEntry = useStore((s) => s.createEntry)
   const deleteEntry = useStore((s) => s.deleteEntry)
+  const renameEntry = useStore((s) => s.renameEntry)
   const revealEntry = useStore((s) => s.revealEntry)
 
   // 右键菜单：坐标 + 目标
   const [menu, setMenu] = useState<(MenuTarget & { x: number; y: number }) | null>(null)
-  // 当前弹窗：新建文件 / 新建文件夹 / 删除确认
+  // 当前弹窗：新建文件 / 新建文件夹 / 重命名 / 删除确认
   const [dialog, setDialog] = useState<
-    { kind: 'file' | 'dir' | 'delete'; parent: string; target?: MenuTarget } | null
+    { kind: 'file' | 'dir' | 'rename' | 'delete'; parent: string; target?: MenuTarget } | null
   >(null)
 
   if (!rootPath) {
@@ -189,26 +191,45 @@ export function FileTree() {
   }
 
   const menuItems: MenuEntry[] = menu
-    ? [
-        {
-          label: '新建文件',
-          onSelect: () =>
-            // 右键目录 → 建在它里面；右键文件 → 建在它旁边
-            setDialog({ kind: 'file', parent: menu.isDir ? menu.path : menu.parent }),
-        },
-        {
-          label: '新建文件夹',
-          onSelect: () =>
-            setDialog({ kind: 'dir', parent: menu.isDir ? menu.path : menu.parent }),
-        },
-        { label: '打开文件位置', sep: true, onSelect: () => void revealEntry(menu.path) },
-        {
-          label: '删除',
-          sep: true,
-          danger: true,
-          onSelect: () => setDialog({ kind: 'delete', parent: menu.parent, target: menu }),
-        },
-      ]
+    ? (() => {
+        const items: MenuEntry[] = [
+          {
+            label: '新建文件',
+            onSelect: () =>
+              // 右键目录 → 建在它里面；右键文件 → 建在它旁边
+              setDialog({ kind: 'file', parent: menu.isDir ? menu.path : menu.parent }),
+          },
+          {
+            label: '新建文件夹',
+            onSelect: () =>
+              setDialog({ kind: 'dir', parent: menu.isDir ? menu.path : menu.parent }),
+          },
+        ]
+        // 工作区根目录不允许重命名：会打乱 rootPath 与所有已缓存路径
+        const canRename = menu.path !== rootPath
+        if (canRename) {
+          items.push({
+            label: '重命名',
+            sep: true,
+            onSelect: () => setDialog({ kind: 'rename', parent: menu.parent, target: menu }),
+          })
+        }
+        items.push(
+          {
+            label: '打开文件位置',
+            // 没有「重命名」时靠这条分隔线把新建组与定位/删除分开
+            sep: !canRename,
+            onSelect: () => void revealEntry(menu.path),
+          },
+          {
+            label: '删除',
+            sep: true,
+            danger: true,
+            onSelect: () => setDialog({ kind: 'delete', parent: menu.parent, target: menu }),
+          }
+        )
+        return items
+      })()
     : []
 
   return (
@@ -277,6 +298,22 @@ export function FileTree() {
             const parent = dialog.parent
             setDialog(null)
             void createEntry(parent, name, true)
+          }}
+        />
+      )}
+
+      {dialog?.kind === 'rename' && dialog.target && (
+        <NameDialog
+          title={dialog.target.isDir ? '重命名文件夹' : '重命名文件'}
+          hint="改名会直接作用到磁盘，扩展名可一并修改"
+          defaultValue={dialog.target.name}
+          confirmText="重命名"
+          onCancel={() => setDialog(null)}
+          onConfirm={(name) => {
+            const t = dialog.target as MenuTarget
+            const parent = dialog.parent
+            setDialog(null)
+            void renameEntry(t.path, t.isDir, parent, name)
           }}
         />
       )}

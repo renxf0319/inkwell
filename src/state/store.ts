@@ -126,6 +126,13 @@ interface AppState {
   createEntry: (parentPath: string, name: string, isDir: boolean) => Promise<void>
   /** 删除文件或目录（目录递归），并同步磁盘 */
   deleteEntry: (path: string, isDir: boolean, parentPath: string) => Promise<void>
+  /** 重命名文件或目录（同一父目录内改名），并同步磁盘 */
+  renameEntry: (
+    path: string,
+    isDir: boolean,
+    parentPath: string,
+    newName: string
+  ) => Promise<void>
   /** 在系统文件管理器里定位该路径 */
   revealEntry: (path: string) => Promise<void>
   closeDoc: () => void
@@ -531,6 +538,49 @@ export const useStore = create<AppState>((set, get) => ({
       // 顶部横幅只会造成干扰。失败仍走下面的 error 分支。
     } catch (e) {
       set({ notice: { kind: 'error', text: `删除「${name}」失败：${errText(e)}` } })
+    }
+  },
+
+  async renameEntry(path, isDir, parentPath, newName) {
+    const oldName = rootNameOf(path)
+    const trimmed = newName.trim()
+    // 空名 = 用户清空后确认；没改 = 原样，两种情况都不该落盘
+    if (!trimmed || trimmed === oldName) return
+    if (/[\\/:*?"<>|]/.test(trimmed)) {
+      set({ notice: { kind: 'error', text: '名称不能包含 \\ / : * ? " < > | 这些字符' } })
+      return
+    }
+    try {
+      const newPath = await fsApi.rename(path, trimmed)
+      const sep = path.includes('\\') ? '\\' : '/'
+      // 改的若是当前打开的文件（或它所在目录），把标签里的路径一并迁走。
+      // 不迁的话保存会写回旧路径、再点一次还会打开「已不存在」的文件。
+      set((s) => ({
+        tabs: s.tabs.map((t) => {
+          if (!t.path) return t
+          if (t.path === path) return { ...t, path: newPath, name: trimmed }
+          const prefix = path + sep
+          if (isDir && t.path.startsWith(prefix)) {
+            return { ...t, path: newPath + sep + t.path.slice(prefix.length) }
+          }
+          return t
+        }),
+      }))
+      // 目录改名后，旧路径及其整棵子树的 dirs / expanded 缓存全部失效
+      if (isDir) {
+        const prefix = path + sep
+        set((s) => {
+          const dirs = { ...s.dirs }
+          const expanded = { ...s.expanded }
+          for (const k of Object.keys(dirs)) if (k === path || k.startsWith(prefix)) delete dirs[k]
+          for (const k of Object.keys(expanded))
+            if (k === path || k.startsWith(prefix)) delete expanded[k]
+          return { dirs, expanded }
+        })
+      }
+      await get().loadDir(parentPath)
+    } catch (e) {
+      set({ notice: { kind: 'error', text: `重命名「${oldName}」失败：${errText(e)}` } })
     }
   },
 

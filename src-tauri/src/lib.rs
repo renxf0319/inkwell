@@ -21,6 +21,7 @@ pub fn run() {
             commands::create_dir,
             commands::remove_file,
             commands::remove_dir,
+            commands::rename_path,
             commands::reveal_in_explorer,
             // 实时文件同步
             watch::watch_workspace,

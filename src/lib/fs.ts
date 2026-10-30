@@ -476,6 +476,42 @@ export const fsApi = {
   },
 
   /**
+   * 重命名文件或目录（同一父目录内改名），返回新的完整路径。
+   *
+   * 桌面端走 Rust 的 `fs::rename`（文件/目录通用）。
+   * 浏览器模式没有原生 rename：文件用「复制字节 → 建新 → 删旧」模拟，
+   * 目录的递归复制风险太大且没有失败回滚，明确拒绝并提示用桌面版。
+   */
+  async rename(path: string, newName: string): Promise<string> {
+    const { parent, name: oldName } = splitPath(path)
+    const full = joinPath(parent, newName)
+    if (isTauri) {
+      await tauriInvoke<void>('rename_path', { from: path, to: full })
+      return full
+    }
+    const dir = await browserParentOf(parent)
+    if (!(await browserEntryExists(dir, oldName))) {
+      throw new Error(`「${oldName}」已不存在（可能已被其它程序移动或删除）`)
+    }
+    if (await browserEntryExists(dir, newName)) {
+      throw new Error(`「${newName}」已存在，请换一个名字`)
+    }
+    // getFileHandle 拿到目录名会抛 TypeMismatchError → 用 null 表示「这是目录」
+    const oldHandle = await dir.getFileHandle(oldName).catch(() => null)
+    if (!oldHandle) {
+      throw new Error('浏览器模式暂不支持重命名文件夹，请用桌面版')
+    }
+    const file = await oldHandle.getFile()
+    const newHandle = await dir.getFileHandle(newName, { create: true })
+    const w = await newHandle.createWritable()
+    // 直接搬运字节（而不是解码成字符串再写回）：避免非 UTF-8 文本被转码毁掉
+    await w.write(await file.arrayBuffer())
+    await w.close()
+    await dir.removeEntry(oldName)
+    return full
+  },
+
+  /**
    * 在系统文件管理器里定位（文件=选中，目录=打开）。
    * 浏览器模式没有对应能力，返回 false 由调用方给出提示。
    */

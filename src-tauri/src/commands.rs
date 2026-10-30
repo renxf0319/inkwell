@@ -193,6 +193,26 @@ pub fn remove_dir(path: String) -> Result<(), String> {
     fs::remove_dir_all(p).map_err(|e| format!("删除失败 {}: {}", path, e))
 }
 
+/// 重命名文件或目录（同一父目录内改名）。
+///
+/// `fs::rename` 在 Windows 上对文件与目录都适用（同卷内就是一次原子的改名）。
+/// 目标已存在时直接拒绝：覆盖既有文件不可接受，与新建时的语义保持一致。
+#[tauri::command]
+pub fn rename_path(from: String, to: String) -> Result<(), String> {
+    let src = Path::new(&from);
+    let dst = Path::new(&to);
+    if !src.exists() {
+        return Err(format!(
+            "「{}」已不存在（可能已被其它程序移动或删除）",
+            from
+        ));
+    }
+    if dst.exists() {
+        return Err(exists_err(dst));
+    }
+    fs::rename(src, dst).map_err(|e| format!("重命名失败 {} → {}: {}", from, to, e))
+}
+
 /// 在系统文件管理器里定位这个路径：
 ///  - 目录 → 直接打开它
 ///  - 文件 → 打开它所在的目录并**选中**该文件
