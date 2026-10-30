@@ -1,6 +1,6 @@
 /**
  * 斜杠命令（`/`）：输入 `/` 后弹出块级元素插入菜单，
- * 包含一级~六级标题、有序 / 无序列表、表格（默认最多 10×10）、代码块。
+ * 包含一级~六级标题、有序 / 无序列表、分割线、表格（默认最多 10×10）、代码块。
  * 选中后把对应 Markdown 片段写进文档，并把光标落到合适位置。
  *
  * ⚠️ 关键实现细节：必须传 `filter: false`，且**不能**同时给 `validFor`。
@@ -77,6 +77,20 @@ const ITEMS: SlashItem[] = [
     detail: '1. ',
     keys: ['ol', '有序', '列表', 'number', 'yxlb', '1.'],
     apply: (view, from, to) => insertBlock(view, from, to, '1. ', 3),
+  },
+  {
+    label: 'HR 分割线',
+    detail: '---',
+    keys: ['hr', '分割线', '分隔线', 'fgx', '---', 'rule', 'hline'],
+    apply: (view, from, to) => {
+      // 分隔线必须独占一行：`/hr` 前面还有正文时先补一个换行，
+      // 否则会变成「正文 ---」这种既不是分割线、又很别扭的行。
+      const line = view.state.doc.lineAt(from)
+      const before = view.state.doc.sliceString(line.from, from)
+      const text = (before.trim() ? '\n' : '') + '---\n'
+      // 光标落到末尾 —— 也就是分割线下面那行，接着就能输入正文
+      insertBlock(view, from, to, text, text.length)
+    },
   },
   {
     label: 'TABLE 表格',

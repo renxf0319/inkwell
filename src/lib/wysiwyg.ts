@@ -1,5 +1,7 @@
 import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view'
 import { StateEffect, StateField, type EditorState, type Extension } from '@codemirror/state'
+import { syntaxTree } from '@codemirror/language'
+import type { SyntaxNode } from '@lezer/common'
 
 // ---------------------------------------------------------------------------
 // Typora 风格「所见即所得」装饰引擎
@@ -356,16 +358,7 @@ function processLine(
   }
 
   // --- 分割线 ---
-  //
-  // ⚠️ 光标在本行时**保留原文**（与围栏行 renderFenceLine 同一策略）。
-  //
-  // 原因：整行被 replace 隐藏后，`.cm-md-hr` 的高度来自 `padding-top: 1.5em`，
-  // 而隐藏文本里的光标落在 content box —— 视觉上正好在横线**下方**。
-  // 用户以为自己在"下一行"，直接打字就被并进 `---`，变成 `---测试`。
-  // 让本行露原文，用户能清楚看到光标还在 `---` 这一行；按 Enter 离开后
-  // 才渲染成分隔线（Typora 也是"这一行写完离开后才成块"）。
   if (HR_RE.test(lineText)) {
-    if (ctx.cursorLine === lineNo) return
     addLine(ctx, lineFrom, 'cm-md-hr')
     hide(ctx, lineFrom, lineFrom + lineText.length)
     return
@@ -1944,8 +1937,73 @@ const tableRefocus = EditorView.updateListener.of((u) => {
   })
 })
 
+/**
+ * 分割线的输入守卫。
+ *
+ * `.cm-md-hr` 把整行 `---` 隐藏成一条横线，光标视觉上落在横线下方，
+ * 但其实仍在 `---` 这一行；直接打字会被并成 `---测试`，横线也随之消失。
+ *
+ * 这里**不改变横线的外观**（光标放上去仍是横线，符合操作习惯），
+ * 而是在输入层把内容让到下一行：
+ *   `---` 上输入「测试」→ `---\n测试`，横线与正文各就各位。
+ *
+ * 只有 `- * _` 与空白直接放行：用户可能还在敲 `----` 或 `- - -`，
+ * 这些都应继续作为同一条分割线，不能被强行断行。
+ */
+const HR_MARK_ONLY = /^[-*_\s]+$/
+
+/**
+ * 该位置所在行是不是真正的分割线。
+ * 代码块里的 `---` 只是源码，不能按分割线处理（否则在代码块里打字会被强行换行）。
+ */
+function isHrLine(view: EditorView, pos: number): boolean {
+  const line = view.state.doc.lineAt(pos)
+  if (!HR_RE.test(line.text)) return false
+  const node = syntaxTree(view.state).resolveInner(line.from, 1)
+  for (let n: SyntaxNode | null = node; n; n = n.parent) {
+    if (n.name === 'FencedCode' || n.name === 'CodeBlock' || n.name === 'CodeText') return false
+  }
+  return true
+}
+
+const hrInputGuard = [
+  EditorView.inputHandler.of((view, from, _to, text) => {
+    if (!isHrLine(view, from)) return false
+    // 继续敲 -/*/_/空白 → 当作延长分割线，交给默认插入
+    if (HR_MARK_ONLY.test(text)) return false
+    // 其余输入（文字 / 粘贴的多字内容）→ 先换行，再放到下一行
+    const line = view.state.doc.lineAt(from)
+    view.dispatch({
+      changes: { from: line.to, to: line.to, insert: '\n' + text },
+      selection: { anchor: line.to + 1 + text.length },
+      scrollIntoView: true,
+      userEvent: 'input.type',
+    })
+    return true
+  }),
+  EditorView.domEventHandlers({
+    keydown(e, view) {
+      // 只接管「纯回车」：带修饰键的交给上层快捷键；输入法组字期间更不能抢
+      if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return false
+      if (e.isComposing) return false
+      const head = view.state.selection.main.head
+      if (!isHrLine(view, head)) return false
+      // 光标停在横线的任意位置，回车都落到行尾之后 —— 不能把 --- 劈成两半
+      const line = view.state.doc.lineAt(head)
+      e.preventDefault()
+      view.dispatch({
+        changes: { from: line.to, insert: '\n' },
+        selection: { anchor: line.to + 1 },
+        scrollIntoView: true,
+        userEvent: 'input',
+      })
+      return true
+    },
+  }),
+]
+
 export function livePreview(): Extension {
-  return [decoField, cursorSync, tableRefocus]
+  return [decoField, cursorSync, tableRefocus, ...hrInputGuard]
 }
 
 // --- 供大纲跳转使用 ------------------------------------------------------
