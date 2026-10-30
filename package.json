@@ -1,7 +1,7 @@
 {
   "name": "kore",
   "private": true,
-  "version": "0.3.14",
+  "version": "0.3.15",
   "type": "module",
   "description": "Kore · 极速本地 Markdown 编辑器（开源 / 无云同步）",
   "license": "MIT",

@@ -527,7 +527,8 @@ export const useStore = create<AppState>((set, get) => ({
       // 删的正好是当前编辑的文件 → 立刻收走，不要留一个指向不存在文件的标签
       if (get().activeTab()?.path === path) set(single(makeBlank()))
       await get().loadDir(parentPath)
-      set({ notice: { kind: 'info', text: `已删除「${name}」` } })
+      // 删除成功不再弹提示：文件树里图标消失本身就是最直接的反馈，
+      // 顶部横幅只会造成干扰。失败仍走下面的 error 分支。
     } catch (e) {
       set({ notice: { kind: 'error', text: `删除「${name}」失败：${errText(e)}` } })
     }
