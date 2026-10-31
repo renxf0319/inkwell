@@ -17,7 +17,7 @@ import {
 import { markdown } from '@codemirror/lang-markdown'
 import { javascript } from '@codemirror/lang-javascript'
 import { syntaxHighlighting, defaultHighlightStyle, HighlightStyle } from '@codemirror/language'
-import { oneDark } from '@codemirror/theme-one-dark'
+import { oneDarkTheme, oneDarkHighlightStyle } from '@codemirror/theme-one-dark'
 import { search, searchKeymap } from '@codemirror/search'
 import { tags } from '@lezer/highlight'
 import {
@@ -45,10 +45,24 @@ import { isMarkdownFile, isCodeFile } from '../lib/filetype'
  * 所以覆盖项必须放在 defaultHighlightStyle.specs **之后**，
  * 放前面会被后面的默认 heading 规则压回去（下划线又回来）。
  */
-const koreHighlightStyle = HighlightStyle.define([
-  ...defaultHighlightStyle.specs,
-  { tag: tags.heading, textDecoration: "none", fontWeight: "bold" },
-])
+/**
+ * 语法高亮样式：按明暗两套基底，并统一覆盖标题颜色。
+ *
+ * ⚠️ 不能直接把 `oneDark`（= oneDarkTheme + oneDarkHighlightStyle）塞进主题
+ * compartment：`oneDarkHighlightStyle` 把 `tags.heading` 设成了 `coral`（红色），
+ * 而且它是**非 fallback** 样式，会盖过下面这份 fallback —— 结果就是
+ * **暗色主题下所有标题变红**。
+ *
+ * 所以这里只取 `oneDarkTheme`（背景 / 选中 / 光标配色），语法高亮基底换成
+ * `oneDarkHighlightStyle.specs`，并在末尾用设计令牌 `--heading-fg` 覆盖 heading。
+ * `HighlightStyle.define` 里后写的规则覆盖先写的，标题因此始终跟随主题前景色。
+ */
+function koreHighlightStyle(dark: boolean): HighlightStyle {
+  return HighlightStyle.define([
+    ...(dark ? oneDarkHighlightStyle.specs : defaultHighlightStyle.specs),
+    { tag: tags.heading, color: 'var(--heading-fg)', textDecoration: 'none', fontWeight: 'bold' },
+  ])
+}
 
 const themeCompartment = new Compartment()
 
@@ -138,7 +152,7 @@ export default function Editor() {
         asMarkdown,
         // 删掉有序列表中的一行后，把后面同缩进列表项的序号接上
         ...(mdMode ? [orderedListRenumber()] : []),
-        syntaxHighlighting(koreHighlightStyle, { fallback: true }),
+        syntaxHighlighting(koreHighlightStyle(theme === 'dark'), { fallback: true }),
         // 输入 ``` 后提示语言标识符（认不全也能选）
         closeBrackets(),
         // 纯文本模式下不装围栏补全：`.sql` 里的 ``` 只是普通字符，
@@ -159,7 +173,7 @@ export default function Editor() {
                 autocompletion({ activateOnTyping: true }),
               ]
             : []),
-        themeCompartment.of(theme === 'dark' ? oneDark : []),
+        themeCompartment.of(theme === 'dark' ? oneDarkTheme : []),
         keymap.of([
           ...closeBracketsKeymap,
           ...defaultKeymap,
